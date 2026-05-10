@@ -349,9 +349,10 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
         n_kv = struct.unpack("<Q", f.read(8))[0]
 
         st = Path(str(path)).lstat()
+        fname = str(Path(str(path)).name)
         metadata = {"format": "gguf", "version": version, "n_tensors": n_tensors, "kv_pairs": {},
-                    "source_files": {str(Path(str(path)).name): []},
-                    "file_times": {str(Path(str(path)).name): (st.st_mtime, st.st_atime)}}
+                    "source_files": {fname: []},
+                    "file_times": {fname: (st.st_mtime, st.st_atime)}}
 
         # Read key-value pairs
         for _ in range(n_kv):
@@ -378,7 +379,7 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
             ggml_type = struct.unpack("<I", f.read(4))[0]
             offset = struct.unpack("<Q", f.read(8))[0]
             tensor_infos.append({"name": name, "shape": shape, "ggml_type": ggml_type, "offset": offset})
-            metadata["source_files"][str(path)].append(name)
+            metadata["source_files"][fname].append(name)
 
         # Store tensor_infos for roundtrip reconstruction
         metadata["tensor_infos"] = tensor_infos
@@ -430,10 +431,14 @@ def _build_vsqz_header(tensors: Dict, metadata: Dict, quantize: str) -> Dict:
             }
             offset += len(raw_bytes)
 
+    # Infer original (pre-quantization) dtype for accurate size reporting
+    orig_dtype = {"fp16": "float32", "fp32": "float32", "int8": "float16", "none": "float32"}.get(quantize, "float32")
+
     header = {
         "vsqz_version": __import__('vsqz').__version__,
         "converted_from": metadata.get("format", "unknown"),
         "quantize": quantize,
+        "original_dtype": orig_dtype,
         "source_metadata": {k: v for k, v in metadata.items() if k != "format"},
         "tensors": tensor_entries,
     }
@@ -731,7 +736,7 @@ def main():
 
     if do_test and source:
         if verbose: print(f"Testing: {source}")
-        from .vsqz_format import _read_sqz
+        from .vsqz_format import _read_vsqz
         header, tensor_data = _read_vsqz(source, verify_sha256=True)
         missing = [n for n in header["tensors"] if n not in tensor_data]
         bad = [n for n, e in header["tensors"].items() if n in tensor_data and len(tensor_data[n]) != e["size"]]
@@ -771,11 +776,11 @@ def main():
                 comp_size = raw_compressed.get(fname, {}).get("size", 0)
             orig_size = raw_original.get(fname, 0) if kind == "file" else 0
             if not orig_size and kind == "tensor":
+                orig_dtype = h.get("original_dtype", "float32")
+                elsize = {"float32": 4, "float16": 2, "int8": 1}.get(orig_dtype, 4)
                 for n in tnames:
                     e = h["tensors"].get(n, {})
                     s = e.get("shape", [])
-                    d = e.get("dtype", "float16")
-                    elsize = {"float32": 4, "float16": 2, "int8": 1}.get(d, 2)
                     nelem = 1
                     for dim in s:
                         nelem *= dim

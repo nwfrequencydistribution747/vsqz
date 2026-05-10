@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vsqz"
-version = "0.3.2"
+version = "0.3.3"
 description = "gzip for AI models — train 13B on 12GB, fine-tune 20B on 24GB. 55% smaller files, 2× longer context."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,8 @@ classifiers = [
 dependencies = [
     "torch>=2.0.0",
     "numpy>=1.24.0",
+    "zstandard>=0.21.0",
+    "safetensors>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -44,4 +46,4 @@ Repository = "https://github.com/butterwecksolutions/vsqz"
 Issues = "https://github.com/butterwecksolutions/vsqz/issues"
 
 [tool.setuptools.packages.find]
-include = ["vram_squeeze*"]
+include = ["vsqz*"]
