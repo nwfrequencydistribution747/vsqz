@@ -782,7 +782,7 @@ Examples:
   vsqz -x adam checkpoint.pt           # strip optimizer states
   vsqz -r models/                      # compress all models in directory
   vsqz --diff base.vsqz fine.gguf -o delta.vsqz   # compute delta (shared weights)
-  vsqz --serve base.vsqz delta1.vsqz              # multi-model: shared base + deltas"""
+  vsqz --serve base.vsqz delta1.vsqz delta2.vsqz  # multi-model: shared base + deltas"""
 
 
 def main():
