@@ -1,6 +1,6 @@
 # vsqz — VRAMSqueeze: VRAM & File Compression for AI Models
 
-Tired of **CUDA Out of Memory (OOM)** errors during LLM fine-tuning? Is your disk getting full, but you don't want to delete models? Are your checkpoints too large to share or upload to the cloud? Want to run **local AI** but lack the required VRAM? 
+Tired of **CUDA Out of Memory (OOM)** errors during LLM fine-tuning? Is your disk getting full, but you don't want to delete models? Are your llm models or checkpoints too large to share or upload to the cloud? Want to run **local AI** but lack the required VRAM? 
 
 `vsqz` solves this.
 
