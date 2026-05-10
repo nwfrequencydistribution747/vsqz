@@ -17,6 +17,18 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 **Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
 
+> 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
+> 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
+> VRAM of 1. Self-describing, SHA-verified, format-agnostic.
+>
+> ```
+> vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
+> vsqz --serve qwen-base.gguf qwopus-delta.vsqz huihui-delta.vsqz  # base once, rest on top
+> ```
+>
+> `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
+> Wrong base → rejected. Same base from any source (GGUF/safetensors/PT) → accepted.
+
 > **v0.3.4 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
@@ -27,6 +39,10 @@ python -m vsqz convert model/ output.vsqz
 
 # List archive contents (files, sizes, permissions, timestamps)
 python -m vsqz -l model.vsqz
+
+# 🔥 Multi-model: delta sharing (v0.4.0)
+vsqz --diff  base.vsqz fine.gguf -o delta.vsqz      # only store changed weights
+vsqz --serve base.gguf delta1.vsqz delta2.vsqz      # 3 models, base loaded once
 
 # Training: wrap your optimizer, save VRAM  
 from vsqz import VRAMSqueeze
