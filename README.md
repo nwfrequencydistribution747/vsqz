@@ -209,6 +209,16 @@ vsqz -t model.vsqz && rm model.safetensors
 # Recursively compress all models, keep originals, show stats
 vsqz -krv ~/models/
 
+# 🔥 Delta sharing: run 5 fine-tunes in the VRAM of 1
+vsqz qwen-base.gguf qwen.vsqz                          # compress base (once)
+vsqz --diff qwen.vsqz qwopus.gguf -o qwopus.vsqz       # build delta (only diffs)
+vsqz --diff qwen.vsqz huihui.gguf -o huihui.vsqz       # another fine-tune
+vsqz -l qwopus.vsqz                                     # peek: which base? how shared?
+vsqz --serve qwen.vsqz qwopus.vsqz huihui.vsqz         # all 3, base loaded once
+
+# Find shared chunk across unrelated models (accidental wins)
+vsqz --diff mistral.vsqz llama.vsqz -o cross.vsqz      # any shared embeddings?
+
 # Decompress zstd archive, verbose
 vsqz -dv model.vsqz.zst
 ```
