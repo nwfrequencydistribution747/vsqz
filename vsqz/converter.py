@@ -1033,7 +1033,9 @@ def main():
             print(f"  + {Path(delta_path).name} ({len(dd)} deltas)")
 
         total_size = sum(t.nbytes for t in base_tensors.values())
-        print(f"  {loaded} models active, VRAM: {_fmt_bytes(base_size)} base + {_fmt_bytes(total_size - base_size)} deltas")
+        saved = _fmt_bytes(base_size * loaded - total_size)
+        print(f"  {loaded} models loaded: base {_fmt_bytes(base_size)} + {loaded-1} delta(s)")
+        print(f"  Total VRAM: {_fmt_bytes(total_size)} (saved {saved} vs loading separately)")
         print("  ✅ Multi-model ready (base shared, deltas applied)")
         return
 
