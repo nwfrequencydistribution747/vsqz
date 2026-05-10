@@ -21,7 +21,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > Run 5 fine-tunes of the same base model at once — load the base weights **once** (8 GB),
 > apply deltas (+1 GB each). 5 models in **13 GB VRAM** instead of 90 GB.
 > 🧪 Preview: --serve loads shared tensors for VRAM measurement.
-> Full multi-model inference coming in v0.4.1.
+> Full multi-model inference coming in soon.
 > `vsqz --diff base.vsqz fine.gguf -o delta.vsqz` + `vsqz --serve base.gguf delta1.vsqz delta2.vsqz ...`
 > Works across safetensors, GGUF, and PyTorch. Same-architecture guaranteed, cross-architecture
 > gets accidental wins (shared embeddings, normalization). [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
