@@ -73,7 +73,12 @@ same files, same directory structure, same permissions.
 |--------|----------|------------|-----------|
 | `model.safetensors` (single) | `.vsqz` | `model.safetensors` | byte-identical |
 | `model/` (directory, sharded) | `.vsqz` | `model/` with all files, subdirs | identical |
-| `.gguf` (llama.cpp, Ollama) | `.vsqz` | `.gguf` (reconstructed) | tensors preserved |
+| `.gguf` (llama.cpp, Ollama) | `.vsqz` | `.gguf` (reconstructed) | tensors + metadata preserved |
+| `.gguf` mmproj (Vision) | `.vsqz` | `.gguf` (reconstructed) | identical to base GGUF |
+
+> **llama.cpp note:** llama.cpp currently reads `.gguf` natively, not `.vsqz`. For llama.cpp
+> inference, decompress once: `vsqz -d model.vsqz model.gguf`. `AutoModel.from_pretrained()`
+> loads `.vsqz` directly with zero extraction — no llama.cpp dependency.
 | `.bin`, `.pt`, `.pth` (PyTorch) | `.vsqz` | original filename | tensors preserved |
 | Non-tensor files (JSON, YAML, PNG, PDF...) | zstd in `.vsqz` | restored as-is | byte-identical ✅ |
 | Directory permissions (chmod) | preserved | restored | `600` → `600` |
