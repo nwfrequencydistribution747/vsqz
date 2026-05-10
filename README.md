@@ -17,7 +17,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 **Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
 
-> **v0.3.3 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
+> **v0.3.4 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
 
@@ -25,8 +25,8 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 # Compress any model: 18GB → 8GB
 python -m vsqz convert model/ output.vsqz
 
-# Info: peek without loading
-python -m vsqz info model.vsqz
+# List archive contents (files, sizes, permissions, timestamps)
+python -m vsqz -l model.vsqz
 
 # Training: wrap your optimizer, save VRAM  
 from vsqz import VRAMSqueeze

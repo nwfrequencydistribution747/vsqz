@@ -354,20 +354,50 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
                     "source_files": {fname: []},
                     "file_times": {fname: (st.st_mtime, st.st_atime)}}
 
-        # Read key-value pairs
+        # Read key-value pairs (all GGUF types preserved for roundtrip)
+        TYPE_NAMES = {1:"uint8",2:"int8",3:"uint16",4:"int16",5:"uint32",6:"int32",
+                      7:"float32",8:"bool",9:"string",10:"array",11:"uint64",12:"int64",13:"float64"}
         for _ in range(n_kv):
             key_len = struct.unpack("<Q", f.read(8))[0]
             key = f.read(key_len).decode("utf-8")
             val_type = struct.unpack("<I", f.read(4))[0]
-            # Simplified: skip complex GGUF value parsing, just read metadata
-            if val_type == 8:  # STRING
+            tname = TYPE_NAMES.get(val_type)
+            if val_type == 9:  # STRING
                 val_len = struct.unpack("<Q", f.read(8))[0]
-                val = f.read(val_len).decode("utf-8")
-                metadata["kv_pairs"][key] = val
-            elif val_type in (4, 6):  # INT32, FLOAT64
-                f.read(4 if val_type == 4 else 8)
+                val = f.read(val_len).decode("utf-8", errors="replace")
+                metadata["kv_pairs"][key] = {"type": "string", "value": val}
+            elif val_type == 8:  # BOOL
+                metadata["kv_pairs"][key] = {"type": "bool", "value": bool(f.read(1)[0])}
+            elif val_type == 10:  # ARRAY
+                elem_type = struct.unpack("<I", f.read(4))[0]
+                count = struct.unpack("<Q", f.read(8))[0]
+                etype = TYPE_NAMES.get(elem_type, "unknown")
+                elem_fmt = {1:"B",2:"b",3:"H",4:"h",5:"I",6:"i",7:"f",11:"Q",12:"q",13:"d"}.get(elem_type)
+                if elem_fmt:
+                    arr = list(struct.unpack(f"<{count}{elem_fmt}", f.read(count * struct.calcsize(elem_fmt))))
+                else:
+                    arr = []
+                metadata["kv_pairs"][key] = {"type": "array", "value": arr, "element_type": etype}
+            elif val_type in (1, 2):  # UINT8, INT8
+                val = f.read(1)[0]; sign = val_type == 2
+                metadata["kv_pairs"][key] = {"type": tname, "value": val - 256 if sign and val > 127 else val}
+            elif val_type in (3, 4):  # UINT16, INT16
+                fmt = "<h" if val_type == 4 else "<H"
+                metadata["kv_pairs"][key] = {"type": tname, "value": struct.unpack(fmt, f.read(2))[0]}
+            elif val_type in (5, 6):  # UINT32, INT32
+                fmt = "<i" if val_type == 6 else "<I"
+                metadata["kv_pairs"][key] = {"type": tname, "value": struct.unpack(fmt, f.read(4))[0]}
+            elif val_type == 7:  # FLOAT32
+                metadata["kv_pairs"][key] = {"type": "float32", "value": struct.unpack("<f", f.read(4))[0]}
+            elif val_type == 13:  # FLOAT64
+                metadata["kv_pairs"][key] = {"type": "float64", "value": struct.unpack("<d", f.read(8))[0]}
+            elif val_type in (11, 12):  # UINT64, INT64
+                fmt = "<q" if val_type == 12 else "<Q"
+                metadata["kv_pairs"][key] = {"type": tname, "value": struct.unpack(fmt, f.read(8))[0]}
             else:
-                f.read(8)  # Skip other types
+                # unknown type — skip 8 bytes as fallback
+                f.read(8)
+                metadata["kv_pairs"][key] = {"type": "unknown", "value": None}
 
         # Read tensor infos
         tensor_infos = []
@@ -494,14 +524,52 @@ def _save_gguf(path: Path, tensors: Dict, metadata: Dict, verbose: bool = False)
         f.write(struct.pack("<Q", len(tensors)))
         f.write(struct.pack("<Q", len(kv_pairs)))
 
-        # Write key-value pairs
-        for key, val in kv_pairs.items():
+        # Write key-value pairs (full GGUF type fidelity)
+        TYPE_CODES = {"uint8":1,"int8":2,"uint16":3,"int16":4,"uint32":5,"int32":6,
+                      "float32":7,"bool":8,"string":9,"array":10,"uint64":11,"int64":12,"float64":13}
+        for key, entry in kv_pairs.items():
             key_bytes = key.encode("utf-8")
             f.write(struct.pack("<Q", len(key_bytes)))
             f.write(key_bytes)
-            if isinstance(val, str):
-                f.write(struct.pack("<I", 8))  # STRING
-                val_bytes = val.encode("utf-8")
+            # Handle both old (raw string) and new (dict with type/value) formats
+            if isinstance(entry, dict) and "type" in entry:
+                tname, v = entry["type"], entry["value"]
+                type_code = TYPE_CODES.get(tname, 0)
+                f.write(struct.pack("<I", type_code))
+                if tname == "string":
+                    val_bytes = str(v).encode("utf-8")
+                    f.write(struct.pack("<Q", len(val_bytes)))
+                    f.write(val_bytes)
+                elif tname == "bool":
+                    f.write(b"\x01" if v else b"\x00")
+                elif tname == "array":
+                    etype_code = TYPE_CODES.get(entry.get("element_type", "int32"), 6)
+                    arr = list(v) if v else []
+                    f.write(struct.pack("<I", etype_code))
+                    f.write(struct.pack("<Q", len(arr)))
+                    e_fmt = {1:"B", 2:"b", 3:"H", 4:"h", 5:"I", 6:"i", 7:"f", 11:"Q", 12:"q", 13:"d"}.get(etype_code, "I")
+                    f.write(struct.pack(f"<{len(arr)}{e_fmt}", *arr) if arr else b"")
+                elif tname in ("float64",):
+                    f.write(struct.pack("<d", float(v)))
+                elif tname in ("uint64", "int64"):
+                    fmt = "<q" if tname == "int64" else "<Q"
+                    f.write(struct.pack(fmt, int(v)))
+                elif tname in ("float32",):
+                    f.write(struct.pack("<f", float(v)))
+                elif tname in ("uint32", "int32"):
+                    fmt = "<i" if tname == "int32" else "<I"
+                    f.write(struct.pack(fmt, int(v)))
+                elif tname in ("uint16", "int16"):
+                    fmt = "<h" if tname == "int16" else "<H"
+                    f.write(struct.pack(fmt, int(v)))
+                elif tname in ("uint8", "int8"):
+                    f.write(struct.pack("B", int(v) & 0xFF))
+                else:
+                    f.write(struct.pack("<Q", 0))  # unknown → skip
+            elif isinstance(entry, str):
+                # Backward compat: old-style raw string
+                f.write(struct.pack("<I", 9))
+                val_bytes = entry.encode("utf-8")
                 f.write(struct.pack("<Q", len(val_bytes)))
                 f.write(val_bytes)
             else:
