@@ -2,7 +2,7 @@
 
 Tired of **CUDA Out of Memory (OOM)** errors during LLM fine-tuning? Is your disk getting full, but you don't want to delete models? Are your LLMs and checkpoints too large to share or upload to the cloud? Want to run **local AI** but lack the required VRAM? 
 
-Instead of buying new disks or GPUs, use `vsqz` — your software solution.
+Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` — your software solution.
 
 **One file. Half the VRAM. Double the model.**
 
