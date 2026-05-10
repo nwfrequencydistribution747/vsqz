@@ -221,6 +221,7 @@ vsqz --diff mistral.vsqz llama.vsqz -o cross.vsqz      # any shared embeddings?
 
 # Decompress zstd archive, verbose
 vsqz -dv model.vsqz.zst
+```
 
 ### How `--serve` works under the hood (Static Sharing)
 
@@ -229,15 +230,14 @@ native PyTorch memory sharing:
 
 1. **Base tensors** are loaded into VRAM once.
 2. **Each delta** is a sparse state-dict — only the layers that differ from base.
-3. A new state-dict is assembled per delta: changed layers are replaced with delta
-   tensors, while unchanged layers simply **reference the base tensors** via Python's
-   object-sharing (same `id()`, same memory pointer).
-4. Result: 5 distinct models ready for inference, sharing 90%+ of their underlying
-   memory pointers. Simple, native, and robust.
+3. For each delta, changed layers are replaced, unchanged layers **reference the
+   base tensors** directly (same Python object, same memory pointer).
+4. Result: 5 models sharing 90%+ of their memory — simple, native, robust.
 
-**True dynamic multiplexing (Stage 2)** — hot-swapping deltas mid-inference without
-rebuilding state-dicts, KV-cache page-switching per model — is on the roadmap.
-```
+**Dynamic multiplexing (Stage 2)** — hot-swapping deltas mid-inference,
+KV-cache page-switching per model — is on the roadmap.
+
+---
 
 ### Verify Compression (before deleting originals)
 
