@@ -62,6 +62,22 @@ squeezer = VRAMSqueeze(model, optimizer=opt, preset="13B_24GB")
 
 *Without vsqz: context halved on every tier.*
 
+## Supported Formats
+
+Compress anything, restore byte-identical. Like gzip, you get back exactly what you put in —
+same files, same directory structure, same permissions.
+
+| Source | Compress | Decompress | Roundtrip |
+|--------|----------|------------|-----------|
+| `model.safetensors` (single) | `.vsqz` | `model.safetensors` | byte-identical |
+| `model/` (directory, sharded) | `.vsqz` | `model/` with all files, subdirs | identical |
+| `.gguf` (llama.cpp, Ollama) | `.vsqz` | `.gguf` (reconstructed) | tensors preserved |
+| `.bin`, `.pt`, `.pth` (PyTorch) | `.vsqz` | original filename | tensors preserved |
+| Non-tensor files (JSON, YAML, PNG, PDF...) | zstd in `.vsqz` | restored as-is | byte-identical ✅ |
+| Directory permissions (chmod) | preserved | restored | `600` → `600` |
+
+`vsqz -l model.vsqz` shows the full contents: filenames, original/compressed sizes, and permissions.
+
 ---
 
 ## VRAM Savings
@@ -127,7 +143,7 @@ Works like gzip. Linux users already know the flags.
 | `-v` / `-q` | Verbose / quiet |
 | `-f` | Force overwrite |
 | `-t` | SHA-256 integrity test |
-| `-l` | List metadata (shows fingerprint) |
+| `-l` | List archive contents (files, sizes, permissions, ratios) |
 | `-r` | Recursive (all models in directory) |
 | `-s SIZE` | Split into chunks (e.g. `-s 8G` for cloud) |
 | `-x KEY` | Exclude tensors (e.g. `-x adam` strips optimizer) |

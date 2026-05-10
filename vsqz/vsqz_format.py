@@ -314,16 +314,32 @@ def _read_vsqz(path: str, verify_sha256: bool = False) -> Tuple[Dict, Dict[str, 
                 logger.warning("Tensor '%s': read %d bytes, expected %d", name, len(data), size)
             tensor_data[name] = data
 
+        # Read raw file blobs
+        raw_blobs: Dict[str, Tuple[bytes, int]] = {}
+        for rel_path, entry in header.get("raw_files", {}).items():
+            offset = entry.get("offset", 0)
+            size = entry["size"]
+            mode = entry.get("mode", 0o644)
+            f.seek(offset)
+            data = f.read(size)
+            raw_blobs[rel_path] = (data, mode)
+
         # SHA-256 verification (data only, no file padding)
         if verify_sha256 and header.get("sha256"):
             sha = hashlib.sha256()
             for name in sorted(header["tensors"].keys()):
                 sha.update(tensor_data[name])
+            for rel_path in sorted(header.get("raw_files", {}).keys()):
+                sha.update(raw_blobs.get(rel_path, (b"", 0))[0])
             computed = sha.hexdigest()
             stored = header["sha256"]
             if computed != stored:
                 raise ValueError(f"SHA-256 mismatch! File may be corrupted.\n  Stored:  {stored}\n  Computed: {computed}")
             logger.info("SHA-256 verified: %s", computed[:16])
+
+    # Add raw file blobs to header for caller convenience
+    if raw_blobs:
+        header["_raw_blobs"] = raw_blobs
 
     return header, tensor_data
 

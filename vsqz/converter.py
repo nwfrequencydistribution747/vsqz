@@ -173,8 +173,10 @@ def convert_to_vsqz(
     strip_savings = original_bytes - final_bytes - quantized_bytes
 
     # ── Write .vsqz ──────────────────────────────────────────────────
+    raw_blobs = metadata.get("raw_files_data")  # peek, don't pop
     header = _build_vsqz_header(tensors, metadata, quantize)
-    _write_vsqz(output_path, header, tensors)
+    metadata.pop("raw_files_data", None)  # clean up after header built
+    _write_vsqz(output_path, header, tensors, raw_blobs)
 
     file_size = output_path.stat().st_size
     stats = {
@@ -217,25 +219,55 @@ def _load_source(path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
 
 
 def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
-    """Load all .safetensors files in a directory."""
+    """Load all .safetensors files recursively. Non-tensor files stored as raw blobs.
+
+    Each file's relative path inside the directory is preserved for roundtrip.
+    """
     try:
         from safetensors import safe_open
     except ImportError:
         raise ImportError("safetensors not installed: pip install safetensors")
 
     tensors = {}
-    metadata = {"format": "safetensors", "source_dir": str(directory)}
-    json_config = directory / "config.json"
-    if json_config.exists():
-        metadata["config"] = json.load(json_config.open())
+    raw_files = {}  # non-tensor files stored verbatim
+    metadata = {"format": "safetensors", "source_dir": str(directory), "source_files": {}}
+    directory = Path(directory).resolve()
 
-    for sf in sorted(directory.glob("*.safetensors")):
-        with safe_open(sf, framework="pt") as f:
-            for key in f.keys():
-                t = f.get_tensor(key)
-                if t.dtype == torch.bfloat16:
-                    t = t.to(torch.float16)
-                tensors[key] = t.cpu().numpy()
+    # Collect all files recursively
+    for fp in sorted(directory.rglob("*")):
+        if fp.is_dir():
+            continue
+        rel = str(fp.relative_to(directory))
+        if fp.suffix in (".safetensors",):
+            metadata["source_files"][rel] = []
+            with safe_open(fp, framework="pt") as f:
+                for key in f.keys():
+                    t = f.get_tensor(key)
+                    if t.dtype == torch.bfloat16:
+                        t = t.to(torch.float16)
+                    tensors[key] = t.cpu().numpy()
+                    metadata["source_files"][rel].append(key)
+        else:
+            # Compress ANY non-tensor file: configs, images, PDFs, etc.
+            with open(fp, "rb") as rf:
+                raw_files[rel] = rf.read()
+            metadata["source_files"][rel] = []  # no tensors, raw blob
+
+    if raw_files:
+        metadata["raw_files_data"] = {}
+        import zstandard as _zstd
+        cctx = _zstd.ZstdCompressor(level=3)
+        for rel, data in raw_files.items():
+            compressed = cctx.compress(data)
+            orig_path = directory / rel
+            metadata["raw_files_data"][rel] = (compressed, orig_path.stat().st_mode & 0o777)
+        # Keep raw_files metadata for listing (original sizes)
+        metadata["raw_files"] = {rel: len(data) for rel, data in raw_files.items()}
+    if "config.json" in raw_files:
+        try:
+            metadata["config"] = json.loads(raw_files["config.json"].decode("utf-8"))
+        except Exception:
+            pass
 
     return tensors, metadata
 
@@ -247,14 +279,16 @@ def _load_safetensors_file(path: Path) -> Tuple[Dict, Dict]:
         raise ImportError("safetensors not installed: pip install safetensors")
 
     tensors = {}
+    tensor_names = []
     with safe_open(path, framework="pt") as f:
         for key in f.keys():
             t = f.get_tensor(key)
             if t.dtype == torch.bfloat16:
                 t = t.to(torch.float16)
             tensors[key] = t.cpu().numpy()
+            tensor_names.append(key)
 
-    return tensors, {"format": "safetensors"}
+    return tensors, {"format": "safetensors", "source_files": {path.name: tensor_names}}
 
 
 def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
@@ -265,6 +299,7 @@ def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
         raise ImportError("PyTorch not installed")
 
     tensors = {}
+    tensor_names = []
     metadata = {"format": "pytorch"}
 
     if isinstance(checkpoint, dict):
@@ -274,13 +309,16 @@ def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
                 for subkey, subval in value.items():
                     if hasattr(subval, "numpy"):
                         tensors[f"{key}.{subkey}"] = subval.cpu().numpy()
+                        tensor_names.append(f"{key}.{subkey}")
                     elif isinstance(subval, (int, float, str)):
                         metadata[f"{key}.{subkey}"] = subval
             elif hasattr(value, "numpy"):
                 tensors[key] = value.cpu().numpy()
+                tensor_names.append(key)
             else:
                 metadata[key] = value
 
+    metadata["source_files"] = {path.name: tensor_names}
     return tensors, metadata
 
 
@@ -295,7 +333,7 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
         n_tensors = struct.unpack("<Q", f.read(8))[0]
         n_kv = struct.unpack("<Q", f.read(8))[0]
 
-        metadata = {"format": "gguf", "version": version, "n_tensors": n_tensors, "kv_pairs": {}}
+        metadata = {"format": "gguf", "version": version, "n_tensors": n_tensors, "kv_pairs": {}, "source_files": {str(path): []}}
 
         # Read key-value pairs
         for _ in range(n_kv):
@@ -322,6 +360,10 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
             ggml_type = struct.unpack("<I", f.read(4))[0]
             offset = struct.unpack("<Q", f.read(8))[0]
             tensor_infos.append({"name": name, "shape": shape, "ggml_type": ggml_type, "offset": offset})
+            metadata["source_files"][str(path)].append(name)
+
+        # Store tensor_infos for roundtrip reconstruction
+        metadata["tensor_infos"] = tensor_infos
 
         # Read tensor data
         tensors = {}
@@ -343,7 +385,7 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
 
 
 def _build_vsqz_header(tensors: Dict, metadata: Dict, quantize: str) -> Dict:
-    """Build .vsqz JSON header with tensor index."""
+    """Build .vsqz JSON header with tensor index and raw file entries."""
     tensor_entries = {}
     # Offsets start AFTER magic(4) + version(4) + header_len(4) + header
     offset = 12 + HEADER_ALIGNMENT
@@ -357,13 +399,132 @@ def _build_vsqz_header(tensors: Dict, metadata: Dict, quantize: str) -> Dict:
         }
         offset += len(blob)
 
-    return {
+    # Raw file blobs come after tensors
+    raw_entries = {}
+    raw_files_data = metadata.pop("raw_files_data", None)
+    if raw_files_data:
+        for rel_path, (raw_bytes, file_mode) in sorted(raw_files_data.items()):
+            raw_entries[rel_path] = {
+                "size": len(raw_bytes),
+                "offset": offset,
+                "compressed": "zstd",
+                "mode": file_mode,
+            }
+            offset += len(raw_bytes)
+
+    header = {
         "vsqz_version": __import__('vsqz').__version__,
         "converted_from": metadata.get("format", "unknown"),
         "quantize": quantize,
         "source_metadata": {k: v for k, v in metadata.items() if k != "format"},
         "tensors": tensor_entries,
     }
+    if raw_entries:
+        header["raw_files"] = raw_entries
+    return header
+
+
+_deletion_allowed = None  # module-level: None=unasked, True=allowed, False=denied
+
+
+def _confirm_deletion(paths, quiet=False):
+    """Ask user to confirm file deletion. Caches answer across calls."""
+    global _deletion_allowed
+    if _deletion_allowed is not None:
+        return _deletion_allowed
+    if quiet:
+        _deletion_allowed = True
+        return True
+    if not sys.stdin.isatty():
+        _deletion_allowed = True  # piped input: proceed (user chose -k if they wanted safety)
+        return True
+    files = [paths] if isinstance(paths, str) else list(paths)
+    print(f"\n  ⚠️  About to delete {len(files)} original file(s):")
+    for f in files:
+        print(f"     → {f}")
+    print()
+    print("  Have you backed up your data? Tested restoration?")
+    print("  Tip: use -k/--keep to preserve originals instead.")
+    try:
+        answer = input("  Delete originals? [yes/no]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Keeping originals (no confirmation).")
+        return False
+    if answer in ("yes", "y"):
+        _deletion_allowed = True
+        return True
+    _deletion_allowed = False
+    print("  Keeping originals. Use -k next time to skip this prompt.")
+    return False
+
+
+def _save_gguf(path: Path, tensors: Dict, metadata: Dict, verbose: bool = False) -> Path:
+    """Write tensors as GGUF format. Preserves kv_pairs, ggml_types, alignment."""
+    tensor_infos = metadata.get("tensor_infos", [])
+    kv_pairs = metadata.get("kv_pairs", {}).copy()
+    version = metadata.get("version", 3)
+    tinfo_map = {ti["name"]: ti for ti in tensor_infos}
+
+    with open(path, "wb") as f:
+        f.write(b"GGUF")
+        f.write(struct.pack("<I", version))
+        f.write(struct.pack("<Q", len(tensors)))
+        f.write(struct.pack("<Q", len(kv_pairs)))
+
+        # Write key-value pairs
+        for key, val in kv_pairs.items():
+            key_bytes = key.encode("utf-8")
+            f.write(struct.pack("<Q", len(key_bytes)))
+            f.write(key_bytes)
+            if isinstance(val, str):
+                f.write(struct.pack("<I", 8))  # STRING
+                val_bytes = val.encode("utf-8")
+                f.write(struct.pack("<Q", len(val_bytes)))
+                f.write(val_bytes)
+            else:
+                f.write(struct.pack("<I", 0))
+                f.write(struct.pack("<Q", 0))
+
+        # Write tensor infos (names, shapes, types) — record offset positions for later update
+        offset_slots = {}  # name → (file_position_for_offset_field)
+        for name in sorted(tensors):
+            info = tinfo_map.get(name, {})
+            ggml_type = info.get("ggml_type", 1)
+            shape = info.get("shape", list(tensors[name].shape))
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<Q", len(name_bytes)))
+            f.write(name_bytes)
+            f.write(struct.pack("<I", len(shape)))
+            for d in shape:
+                f.write(struct.pack("<Q", d))
+            f.write(struct.pack("<I", ggml_type))
+            offset_slots[name] = f.tell()
+            f.write(struct.pack("<Q", 0))  # placeholder
+
+        # Align to 32 bytes for data section
+        pos = f.tell()
+        align = ((pos + 31) // 32) * 32
+        f.write(b"\x00" * (align - pos))
+
+        # Write tensor data, update offsets
+        for name in sorted(tensors):
+            pos = f.tell()
+            align = ((pos + 31) // 32) * 32
+            if align > pos:
+                f.write(b"\x00" * (align - pos))
+            data_start = f.tell()
+            tensor = tensors[name]
+            data = tensor.astype(np.float16).tobytes() if tensor.dtype != np.float16 else tensor.tobytes()
+            f.write(data)
+            # Seek back to update offset in tensor info
+            saved = f.tell()
+            f.seek(offset_slots[name])
+            f.write(struct.pack("<Q", data_start))
+            f.seek(saved)
+
+    if verbose:
+        print(f"  Written: {path} ({_fmt_bytes(path.stat().st_size)})")
+    return path
 
 
 def _apply_zstd(path: str, keep_original: bool = False) -> str:
@@ -393,8 +554,12 @@ def _decompress_zstd(path: str) -> str:
     return out
 
 
-def _write_vsqz(path: Path, header: Dict, tensors: Dict) -> None:
-    """Write .vsqz file with SHA-256 hash + recovery record."""
+def _write_vsqz(path: Path, header: Dict, tensors: Dict, raw_blobs: Dict = None) -> None:
+    """Write .vsqz file with SHA-256 hash + recovery record.
+
+    Args:
+        raw_blobs: Dict of {rel_path: (zstd_compressed_bytes, file_mode)} for non-tensor files
+    """
     import hashlib
 
     header_json = json.dumps(header, indent=2).encode("utf-8")
@@ -409,13 +574,23 @@ def _write_vsqz(path: Path, header: Dict, tensors: Dict) -> None:
         # Write tensors sequentially, computing SHA-256 hash (data only, no padding)
         sha = hashlib.sha256()
         for name in sorted(tensors):
-            # Align and record actual offset (for header rewrite below)
             actual_offset = f.tell()
             header["tensors"][name]["offset"] = actual_offset
             data = tensors[name].tobytes()
             f.write(data)
             sha.update(data)
             header["tensors"][name]["size"] = len(data)
+
+        # Write raw file blobs after tensors
+        if raw_blobs:
+            for rel_path in sorted(raw_blobs):
+                data, _ = raw_blobs[rel_path]
+                actual_offset = f.tell()
+                if "raw_files" in header and rel_path in header["raw_files"]:
+                    header["raw_files"][rel_path]["offset"] = actual_offset
+                    header["raw_files"][rel_path]["size"] = len(data)
+                f.write(data)
+                sha.update(data)
 
         # Insert SHA-256 into main header (seek back and rewrite)
         header["sha256"] = sha.hexdigest()
@@ -556,14 +731,62 @@ def main():
         from .vsqz_format import peek_vsqz
         h = peek_vsqz(source)
         sz = Path(source).stat().st_size
-        print(f"File: {source}\nSize: {_fmt_bytes(sz)}")
+        src_meta = h.get("source_metadata", {})
+        src_files = src_meta.get("source_files", {})
+        raw_original = src_meta.get("raw_files", {})
+        raw_compressed = h.get("raw_files", {})
+
+        # Gather per-file info
+        entries = []  # (name, original_size, compressed_size, kind, mode)
+        for fname, tnames in sorted(src_files.items()):
+            kind = "tensor" if tnames else "file"
+            # Get compressed size
+            comp_size = 0
+            if tnames:
+                for n in tnames:
+                    if n in h.get("tensors", {}):
+                        comp_size += h["tensors"][n].get("size", 0)
+            else:
+                comp_size = raw_compressed.get(fname, {}).get("size", 0)
+            # Get original size
+            orig_size = raw_original.get(fname, 0) if not tnames else 0
+            if not orig_size and tnames:
+                for n in tnames:
+                    e = h["tensors"].get(n, {})
+                    s = e.get("shape", [])
+                    d = e.get("dtype", "float16")
+                    elsize = {"float32": 4, "float16": 2, "int8": 1}.get(d, 2)
+                    nelem = 1
+                    for dim in s:
+                        nelem *= dim
+                    orig_size += nelem * elsize
+            # Get mode
+            if tnames:
+                mode = "644"  # default for tensor files
+            else:
+                mode = oct(raw_compressed.get(fname, {}).get("mode", 0o644))[2:]
+            entries.append((fname, orig_size, comp_size, kind, mode))
+
+        # Print table
+        if entries:
+            print(f"{'Name':<40} {'Mode':>5} {'Original':>12} {'Compressed':>12} {'Ratio':>8}")
+            print(f"{'-'*40} {'-'*5} {'-'*12} {'-'*12} {'-'*8}")
+            total_orig = total_comp = 0
+            for name, orig, comp, kind, mode in entries:
+                ratio = f"{comp/orig*100:.0f}%" if orig > 0 and comp <= orig else ("—" if orig == 0 else f"{comp/orig*100:.0f}%")
+                print(f"{name:<40} {mode:>5} {_fmt_bytes(orig) if orig>0 else '?':>12} {_fmt_bytes(comp):>12} {ratio:>8}")
+                total_orig += orig
+                total_comp += comp
+            total_ratio = f"{total_comp/total_orig*100:.0f}%" if total_orig > 0 else "—"
+            print(f"{'─'*40} {'─'*5} {'─'*12} {'─'*12} {'─'*8}")
+            print(f"{'Total (' + str(len(entries)) + ' files)':<40} {'':>5} {_fmt_bytes(total_orig):>12} {_fmt_bytes(total_comp):>12} {total_ratio:>8}")
+
+        # Summary
         ts = h.get("tensors", {})
-        print(f"Tensors: {len(ts)} ({sum(np.prod(t['shape']) for t in ts.values())/1e6:.1f}M)")
-        print(f"Format: {h.get('converted_from', '?')}  Quantize: {h.get('quantize', '?')}")
-        cfg = h.get("model_config", {}); print(f"Arch: {cfg.get('arch','?')}")
+        total_params = sum(np.prod(t.get("shape",[])) for t in ts.values())
+        print(f"\n  Format: {h.get('converted_from', '?')}  |  Quantize: {h.get('quantize', '?')}  |  {len(ts)} tensors ({total_params/1e6:.1f}M params)")
         sha = h.get("sha256", "")
-        if sha: print(f"SHA-256: {sha}")
-        if h.get("_recovery"): print(f"Recovery: RECORD PRESENT")
+        if sha: print(f"  SHA-256: {sha[:32]}...")
         return
 
     # Handle .vsqz.zst transparently (decompress first)
@@ -578,25 +801,83 @@ def main():
         orig_fmt = header.get("converted_from", "pytorch")
         out_dir = Path(output) if output else Path(source).with_suffix("")
         out_dir.mkdir(parents=True, exist_ok=True)
-        if orig_fmt == "safetensors":
+        src_meta = header.get("source_metadata", {})
+        src_files = src_meta.get("source_files", {})
+        raw_blobs = header.get("_raw_blobs", {})
+
+        # Convert tensors to numpy arrays
+        tensors_np = {}
+        for name, data in tensor_data.items():
+            entry = header["tensors"].get(name, {})
+            dtype = {"float16": np.float16, "float32": np.float32, "int8": np.int8}.get(
+                entry.get("dtype", "float16"), np.float16)
+            shape = entry.get("shape", [])
+            tensors_np[name] = np.frombuffer(data, dtype=dtype).reshape(shape)
+
+        if orig_fmt == "safetensors" and src_files:
+            # Restore per-file structure from source_files mapping
             from safetensors.torch import save_file
-            save_file({n: torch.from_numpy(np.frombuffer(data,
-                dtype={"float16":np.float16,"float32":np.float32,"int8":np.int8}.get(header["tensors"][n]["dtype"],np.float16)
-            ).copy().reshape(header["tensors"][n]["shape"])) for n, data in tensor_data.items()},
-                str(out_dir / "model.safetensors"))
+            for fname, tnames in sorted(src_files.items()):
+                if not tnames:
+                    continue  # raw file, handled below
+                out_path = out_dir / fname
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                save_file({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np},
+                          str(out_path))
+                if verbose: print(f"  → {out_path}")
+        elif orig_fmt == "gguf":
+            gguf_path = out_dir / "model.gguf"
+            _save_gguf(gguf_path, tensors_np, src_meta, verbose=verbose)
+            if verbose: print(f"  → {gguf_path}")
         else:
-            torch.save({n: torch.from_numpy(np.frombuffer(data,
-                dtype={"float16":np.float16,"float32":np.float32,"int8":np.int8}.get(header["tensors"][n]["dtype"],np.float16)
-            ).copy().reshape(header["tensors"][n]["shape"])) for n, data in tensor_data.items()},
-                str(out_dir / "pytorch_model.bin"))
+            if src_files:
+                # Restore per-file structure for pytorch
+                for fname, tnames in sorted(src_files.items()):
+                    if not tnames:
+                        continue
+                    out_path = out_dir / fname
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np},
+                               str(out_path))
+                    if verbose: print(f"  → {out_path}")
+            else:
+                out_path = out_dir / "pytorch_model.bin"
+                torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tensor_data},
+                           str(out_path))
+                if verbose: print(f"  → {out_path}")
+
+        # Restore raw (non-tensor) files
+        import zstandard as _zstd
+        dctx = _zstd.ZstdDecompressor()
+        for rel_path, (data, mode) in sorted(raw_blobs.items()):
+            out_path = out_dir / rel_path
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            decompressed = dctx.decompress(data)
+            out_path.write_bytes(decompressed)
+            if mode:
+                try:
+                    out_path.chmod(mode)
+                except (PermissionError, OSError) as e:
+                    if verbose:
+                        print(f"  ⚠️  Cannot chmod {out_path} to {mode:o}: {e}")
+            if verbose: print(f"  → {out_path}")
+
+        # Restore config.json if we had one at top level
+        config = src_meta.get("config")
+        if config and not (out_dir / "config.json").exists():
+            (out_dir / "config.json").write_text(json.dumps(config, indent=2))
+
         if verbose: print(f"  {_fmt_bytes(Path(source).stat().st_size)} → {out_dir}/")
-        if not keep: os.remove(source)
+        if not keep:
+            if _confirm_deletion(source):
+                os.remove(source)
         return
 
     if recursive and source:
         import glob as _g
         sp = Path(source)
         files = [sp] if sp.is_file() else list(_g.glob(str(sp / "**/*.safetensors"), recursive=True)) + list(_g.glob(str(sp / "**/*.gguf"), recursive=True))
+        to_delete = []
         for f in files:
             out = str(f) + ".vsqz"
             if Path(out).exists() and not force:
@@ -604,6 +885,9 @@ def main():
                 continue
             convert_to_vsqz(str(f), out, quantize=quantize, verbose=verbose)
             if not keep:
+                to_delete.append(f)
+        if to_delete and _confirm_deletion(to_delete, quiet=quiet):
+            for f in to_delete:
                 os.remove(f)
         return
 
@@ -653,7 +937,8 @@ def main():
         output = zst_path
 
     if not keep and Path(source).is_file():
-        os.remove(source)
+        if _confirm_deletion(source, quiet=quiet):
+            os.remove(source)
 
 
 if __name__ == "__main__":
