@@ -20,6 +20,8 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
 > 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
 > VRAM of 1. Self-describing, SHA-verified, format-agnostic.
+> 🧪 Preview: --serve loads shared tensors for VRAM measurement.
+> Full multi-model inference coming soon.
 >
 > ```
 > vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
