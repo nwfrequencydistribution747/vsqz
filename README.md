@@ -17,6 +17,13 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 **Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
 
+> 🔥 **Coming in v0.4.0 ([dev branch](https://github.com/butterwecksolutions/vsqz/tree/dev)):** Multi-model delta sharing.
+> Run 5 fine-tunes of the same base model at once — load the base weights **once** (8 GB),
+> apply deltas (+1 GB each). 5 models in **13 GB VRAM** instead of 90 GB.
+> `vsqz --diff base.vsqz fine.gguf -o delta.vsqz` + `vsqz --serve base.gguf delta1.vsqz delta2.vsqz ...`
+> Works across safetensors, GGUF, and PyTorch. Same-architecture guaranteed, cross-architecture
+> gets accidental wins (shared embeddings, normalization). [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
+
 > **v0.3.4 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
