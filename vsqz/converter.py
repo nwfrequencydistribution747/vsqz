@@ -244,7 +244,7 @@ def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
         rel = str(fp.relative_to(directory))
         file_times[rel] = (st.st_mtime, st.st_atime)
 
-        if fp.is_symlink():
+        if fp.is_symlink() and fp.suffix not in (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt"):
             symlinks[rel] = os.readlink(fp)
             metadata["source_files"][rel] = []
         elif fp.suffix in (".safetensors",):
