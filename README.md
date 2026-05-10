@@ -41,8 +41,8 @@ python -m vsqz convert model/ output.vsqz
 python -m vsqz -l model.vsqz
 
 # 🔥 Multi-model: delta sharing (v0.4.0)
-vsqz --diff  base.vsqz fine.gguf -o delta.vsqz      # only store changed weights
-vsqz --serve base.gguf delta1.vsqz delta2.vsqz      # 3 models, base loaded once
+vsqz --diff  qwen.vsqz qwopus.gguf -o qwopus-delta.vsqz   # store only changed weights
+vsqz --serve qwen.vsqz qwopus-delta.vsqz ablit-delta.vsqz # 3 models, base once
 
 # Training: wrap your optimizer, save VRAM  
 from vsqz import VRAMSqueeze
