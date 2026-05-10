@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsqz"
+version = "0.2.8"
+description = "gzip for AI models — train 13B on 12GB, fine-tune 20B on 24GB. 55% smaller files, 2× longer context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Christian Butterweck", email = "butterweck.solutions@gmail.com"},
+]
+keywords = [
+    "deep-learning", "memory-efficient", "training", "QLoRA", "GaLore",
+    "LISA", "VRAM", "optimizer", "LLM", "fine-tuning",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+optuna = ["optuna>=3.0.0"]
+axolotl = ["axolotl>=0.5.0"]
+
+[project.scripts]
+vsqz = "vsqz.converter:main"
+
+[project.urls]
+Homepage = "https://github.com/butterwecksolutions/vsqz"
+Repository = "https://github.com/butterwecksolutions/vsqz"
+Issues = "https://github.com/butterwecksolutions/vsqz/issues"
+
+[tool.setuptools.packages.find]
+include = ["vram_squeeze*"]

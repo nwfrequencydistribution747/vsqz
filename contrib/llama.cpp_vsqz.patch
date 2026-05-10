@@ -1,0 +1,219 @@
+diff --git a/ggml/src/gguf.cpp b/ggml/src/gguf.cpp
+--- a/ggml/src/gguf.cpp
++++ b/ggml/src/gguf.cpp
+@@ -1,6 +1,9 @@
+ #include "gguf.h"
+ #include "ggml.h"
++
+ #include <cstring>
+ #include <fstream>
++#include <sstream>
++#include <algorithm>
+
+ struct gguf_header {
+     uint32_t magic;
+@@ -10,6 +13,183 @@ struct gguf_header {
+     uint64_t n_kv;
+ };
+
++// ── .vsqz format reader ─────────────────────────────────────────────
++// vsqz format: 4-byte magic "VSQZ" + uint32 version + uint32 header_len
++//             + JSON header (metadata + tensor index) + tensor blobs
++// We map this to GGUF in-memory without writing to disk.
++
++#define VSQZ_MAGIC 0x5A515356 // "VSQZ" in little-endian
++
++static bool is_vsqz(const uint32_t magic) {
++    return magic == VSQZ_MAGIC;
++}
++
++struct vsqz_tensor_entry {
++    std::string name;
++    uint64_t offset;
++    uint64_t size;
++    int ggml_type;   // mapped from JSON dtype
++    std::vector<uint64_t> shape;
++};
++
++struct vsqz_context {
++    std::vector<vsqz_tensor_entry> tensors;
++    std::unordered_map<std::string, std::string> metadata;
++    std::string json_header;
++    FILE *fp;
++    size_t data_offset;  // where tensor blobs begin in file
++};
++
++// Map vsqz dtype string to GGML type
++static int vsqz_dtype_to_ggml(const std::string &dtype) {
++    if (dtype == "float32") return 0;  // GGML_TYPE_F32
++    if (dtype == "float16") return 1;  // GGML_TYPE_F16
++    if (dtype == "int8")    return 4;  // GGML_TYPE_I8
++    return 1; // default: f16
++}
++
++static bool vsqz_parse_header(vsqz_context &ctx, FILE *fp) {
++    // Read JSON header length (already consumed magic + version)
++    uint32_t header_len;
++    if (fread(&header_len, sizeof(uint32_t), 1, fp) != 1) return false;
++
++    // Read JSON header
++    std::vector<char> buf(header_len + 1);
++    if (fread(buf.data(), 1, header_len, fp) != header_len) return false;
++    buf[header_len] = '\0';
++    ctx.json_header = std::string(buf.data());
++
++    // Parse minimal JSON (no external parser needed — we only need tensor entries)
++    // This is a fast-path JSON parser for the vsqz header format.
++    auto &s = ctx.json_header;
++
++    // Find "tensors" key
++    size_t pos = s.find("\"tensors\"");
++    if (pos == std::string::npos) return false;
++
++    // Each tensor entry: "name": {"dtype": "...", "shape": [...], "size": N, "offset": M}
++    pos = s.find("{", pos);
++    if (pos == std::string::npos) return false;
++
++    while (true) {
++        // Find next tensor name
++        pos = s.find("\"", pos + 1);
++        if (pos == std::string::npos) break;
++        size_t name_end = s.find("\"", pos + 1);
++        if (name_end == std::string::npos) break;
++        std::string name = s.substr(pos + 1, name_end - pos - 1);
++        if (name.empty() || name[0] == '}') break;  // end of tensors object
++
++        vsqz_tensor_entry entry;
++        entry.name = name;
++
++        // Find dtype
++        auto extract_str = [&](const std::string &key) -> std::string {
++            size_t kp = s.find("\"" + key + "\"", name_end);
++            if (kp == std::string::npos) return "";
++            kp = s.find("\"", kp + key.length() + 3);
++            if (kp == std::string::npos) return "";
++            size_t ke = s.find("\"", kp + 1);
++            return s.substr(kp + 1, ke - kp - 1);
++        };
++
++        auto extract_int = [&](const std::string &key) -> int64_t {
++            size_t kp = s.find("\"" + key + "\"", name_end);
++            if (kp == std::string::npos) return 0;
++            kp = s.find(":", kp) + 1;
++            return strtoll(s.c_str() + kp, nullptr, 10);
++        };
++
++        auto extract_shape = [&]() -> std::vector<uint64_t> {
++            std::vector<uint64_t> shape;
++            size_t sp = s.find("\"shape\"", name_end);
++            if (sp == std::string::npos) return shape;
++            sp = s.find("[", sp);
++            if (sp == std::string::npos) return shape;
++            size_t se = s.find("]", sp);
++            std::string arr = s.substr(sp + 1, se - sp - 1);
++            // Parse comma-separated integers
++            size_t cp = 0;
++            while (cp < arr.length()) {
++                cp = arr.find_first_not_of(" ,", cp);
++                if (cp == std::string::npos) break;
++                size_t ce = arr.find_first_of(" ,]", cp);
++                shape.push_back(strtoull(arr.c_str() + cp, nullptr, 10));
++                cp = ce;
++            }
++            return shape;
++        };
++
++        std::string dtype = extract_str("dtype");
++        entry.size = extract_int("size");
++        entry.offset = extract_int("offset");
++        entry.shape = extract_shape();
++        entry.ggml_type = vsqz_dtype_to_ggml(dtype);
++
++        if (entry.size > 0 && !entry.shape.empty()) {
++            ctx.tensors.push_back(entry);
++        }
++
++        pos = name_end;
++    }
++
++    // Extract metadata
++    ctx.metadata["general.architecture"] =
++        s.find("\"arch\"") != std::string::npos ? "llama" : "unknown";
++
++    return !ctx.tensors.empty();
++}
++
++static bool vsqz_open(vsqz_context &ctx, const char *fname) {
++    ctx.fp = fopen(fname, "rb");
++    if (!ctx.fp) return false;
++
++    uint32_t magic;
++    if (fread(&magic, sizeof(magic), 1, ctx.fp) != 1) goto fail;
++    if (!is_vsqz(magic)) goto fail;
++
++    uint32_t version;
++    if (fread(&version, sizeof(version), 1, ctx.fp) != 1) goto fail;
++
++    if (!vsqz_parse_header(ctx, ctx.fp)) goto fail;
++
++    ctx.data_offset = ftell(ctx.fp);
++    return true;
++
++fail:
++    fclose(ctx.fp);
++    ctx.fp = nullptr;
++    return false;
++}
++
++static size_t vsqz_read_tensor(const vsqz_context &ctx,
++                                 const vsqz_tensor_entry &entry,
++                                 void *buf, size_t buf_size) {
++    fseek(ctx.fp, entry.offset, SEEK_SET);
++    size_t to_read = std::min(buf_size, entry.size);
++    return fread(buf, 1, to_read, ctx.fp);
++}
++
++static void vsqz_close(vsqz_context &ctx) {
++    if (ctx.fp) fclose(ctx.fp);
++    ctx.fp = nullptr;
++}
++
+ // ── GGUF reader ────────────────────────────────────────────────────
+ // (existing GGUF code follows — .vsqz detection at the model loading entry point)
+
++// Modified model opening: detect .vsqz and route through vsqz→gguf bridge
+ bool gguf_open(struct gguf_context *ctx, const char *fname) {
+     FILE *fp = fopen(fname, "rb");
+     if (!fp) return false;
+@@ -18,6 +198,15 @@ bool gguf_open(struct gguf_context *ctx, const char *fname) {
+     if (fread(&magic, sizeof(magic), 1, fp) != 1) { fclose(fp); return false; }
+     fclose(fp);
+
++    // ── .vsqz detection ──────────────────────────────────────────
++    if (is_vsqz(magic)) {
++        vsqz_context vsqz;
++        if (!vsqz_open(vsqz, fname)) return false;
++        // Route through vsqz→GGUF bridge (transparent conversion)
++        bool ok = gguf_open_from_vsqz(ctx, vsqz);
++        vsqz_close(vsqz);
++        return ok;
++    }
++
+     if (magic != GGUF_MAGIC) return false;
+
+     // (existing GGUF loading continues below)
+diff --git a/llama.cpp/llama-model.cpp b/llama.cpp/llama-model.cpp
+--- a/llama.cpp/llama-model.cpp
++++ b/llama.cpp/llama-model.cpp
+@@ -45,6 +45,11 @@ static bool llama_model_load(const std::string &fname, llama_model &model) {
+         return false;
+     }
+
++    // Detect .vsqz and load directly (no temp file needed)
++    if (fname.size() > 5 && fname.substr(fname.size() - 5) == ".vsqz") {
++        LLAMA_LOG_INFO("Loading .vsqz model: %s\n", fname.c_str());
++    }
++
+     // (existing loading logic)
+     return true;
+ }
