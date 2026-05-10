@@ -15,9 +15,9 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 `pip install vsqz` — the `gzip` for AI models. Train 13B on a 12GB card. Fine-tune 20B on 24GB. Double your context window. 55% smaller files = 55% faster downloads, 55% less disk. Works on RTX to H100 — avoid unnecessary GPU upgrades.
 
-> **v0.2.6 — production-tested.** 8 training + 3 archival techniques verified in 9B QLoRA (RTX 3090).
-> 41 tests, autonomous CI, PR review bot. `AutoModel.from_pretrained(".vsqz")` works.
-> Proven in 9B QLoRA production training (RTX 3090). 41 tests, 8 CI checks per PR.
+> **v0.3.3 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
+> directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
+> `vsqz -l` lists archive contents. 41 tests, autonomous CI.
 
 ```
 # Compress any model: 18GB → 8GB
