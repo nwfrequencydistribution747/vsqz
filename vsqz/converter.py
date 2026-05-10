@@ -918,6 +918,18 @@ def main():
         print(f"\n  Format: {h.get('converted_from', '?')}  |  Quantize: {h.get('quantize', '?')}  |  {len(ts)} tensors ({total_params/1e6:.1f}M params)")
         sha = h.get("sha256", "")
         if sha: print(f"  SHA-256: {sha[:32]}...")
+
+        # Delta self-description
+        if h.get("delta"):
+            bi = h.get("base_model", {})
+            print(f"\n  🧬 Delta file — requires base model:")
+            print(f"    Architecture:  {bi.get('architecture', '?')}")
+            print(f"    Parameters:    {bi.get('total_params', 0)/1e9:.1f}B")
+            print(f"    Layers:        {bi.get('layer_count', '?'):>4}  |  Tensors: {bi.get('tensor_count', '?'):>4}  |  Hidden: {bi.get('hidden_dim', '?') or '?'}")
+            print(f"    Vocab:         {bi.get('vocab_size', '?'):>6}  |  Source: {bi.get('source_name', '?')}")
+            print(f"    Base built:    {bi.get('source_mtime', '?')}  |  Delta created: {bi.get('delta_created', '?')}")
+            print(f"    Base SHA-256:  {h.get('base_sha256', '?')[:32]}...")
+            print(f"    Shared tensors: {h.get('shared_count', '?')}/{bi.get('tensor_count', '?')}")
         return
 
     # ── Diff ────────────────────────────────────────────────────────
@@ -975,6 +987,35 @@ def main():
             print("  ✅ Models are identical — no delta needed.")
             return
 
+        # Build comprehensive base metadata for self-documenting deltas
+        total_params = sum(int(np.prod(t.shape)) for t in base_tensors.values())
+        embed_key = next((n for n in base_tensors if 'embed' in n.lower()), None)
+        vocab_size = int(base_tensors[embed_key].shape[0]) if embed_key else None
+        hidden_dim = int(base_tensors[embed_key].shape[1]) if embed_key and len(base_tensors[embed_key].shape) > 1 else None
+        layer_count = len([n for n in base_tensors if 'layers.' in n])  # approximate
+        # Collect GGUF-style metadata if available
+        kv_pairs = bh.get("source_metadata", {}).get("kv_pairs", {})
+        arch = kv_pairs.get("general.architecture", {})
+        arch_name = arch.get("value") if isinstance(arch, dict) else bh.get("model_config", {}).get("arch", "unknown")
+
+        base_info = {
+            "sha256": base_sha,
+            "tensor_count": len(base_tensors),
+            "total_params": total_params,
+            "hidden_dim": hidden_dim,
+            "vocab_size": vocab_size,
+            "layer_count": layer_count,
+            "architecture": str(arch_name) if arch_name else "unknown",
+            "source_format": bh.get("converted_from", "safetensors"),
+            "source_name": Path(source).name,
+            "source_mtime": datetime.datetime.fromtimestamp(
+                Path(source).stat().st_mtime
+            ).isoformat(),
+            "delta_created": datetime.datetime.now().isoformat(),
+        }
+        if kv_pairs:
+            base_info["gguf_metadata"] = kv_pairs
+
         # Write delta .vsqz — uses the verified base SHA from the .vsqz header
         delta_meta = {
             "format": base_meta.get("format", "safetensors"),
@@ -983,6 +1024,7 @@ def main():
         delta_header = _build_vsqz_header(deltas, delta_meta, "fp16")
         delta_header["delta"] = True
         delta_header["base_sha256"] = base_sha
+        delta_header["base_model"] = base_info
         delta_header["shared_count"] = shared
         _write_vsqz(Path(delta_out), delta_header, deltas)
         if verbose:
@@ -1021,7 +1063,13 @@ def main():
                 continue
             expected_sha = dh.get("base_sha256", "")
             if expected_sha and expected_sha != base_sha:
-                print(f"  ⚠️  {delta_path} base SHA mismatch — wrong base model? Skipping")
+                bi = dh.get("base_model", {})
+                arch = bi.get("architecture", "unknown")
+                params = bi.get("total_params", 0)/1e9
+                print(f"  ⚠️  {Path(delta_path).name}: BASE MISMATCH")
+                print(f"      Expected: {arch} ({params:.1f}B) — SHA {expected_sha[:16]}...")
+                print(f"      Loaded:   {_fmt_bytes(base_size)} base — SHA {base_sha[:16]}...")
+                print(f"      Skipping this delta.")
                 continue
             for name in sorted(dd):
                 if name in base_tensors:
