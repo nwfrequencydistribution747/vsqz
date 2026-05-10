@@ -766,6 +766,9 @@ Options:
   -s, --split SIZE   Split output into chunks (e.g. -s 8G for cloud upload)
   -x, --exclude KEY  Exclude tensors matching pattern (e.g. -x adam -x opt)
   -z, --zstd         Post-compress with zstd (archive mode, 5-15% smaller)
+  --diff             Compute delta between base and variant (only differing weights)
+  --serve            Multi-model: load base once, apply deltas on top
+  -o, --output OUT   Output file (for --diff)
   -h, --help         Show this help
 
 Examples:
@@ -777,7 +780,9 @@ Examples:
   vsqz -9 -v model.gguf                # best compression, verbose
   vsqz -s 8G large-20B.safetensors     # split into 8 GB chunks
   vsqz -x adam checkpoint.pt           # strip optimizer states
-  vsqz -r models/                      # compress all models in directory"""
+  vsqz -r models/                      # compress all models in directory
+  vsqz --diff base.vsqz fine.gguf -o delta.vsqz   # compute delta (shared weights)
+  vsqz --serve base.gguf delta.vsqz     # multi-model: shared base + deltas"""
 
 
 def main():
