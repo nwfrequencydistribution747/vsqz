@@ -75,6 +75,8 @@ same files, same directory structure, same permissions.
 | `.bin`, `.pt`, `.pth` (PyTorch) | `.vsqz` | original filename | tensors preserved |
 | Non-tensor files (JSON, YAML, PNG, PDF...) | zstd in `.vsqz` | restored as-is | byte-identical ✅ |
 | Directory permissions (chmod) | preserved | restored | `600` → `600` |
+| File timestamps (mtime, atime) | preserved | restored | `os.utime()` |
+| Symlinks | target stored | recreated | `model/ → ../shared/model/` |
 
 `vsqz -l model.vsqz` shows the full contents: filenames, original/compressed sizes, and permissions.
 

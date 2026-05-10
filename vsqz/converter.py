@@ -25,6 +25,7 @@ CLI Usage:
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -219,7 +220,7 @@ def _load_source(path: Path) -> Tuple[Dict[str, np.ndarray], Dict]:
 
 
 def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
-    """Load all .safetensors files recursively. Non-tensor files stored as raw blobs.
+    """Load all files recursively. Symlinks, mtime/atime, and subdirs preserved.
 
     Each file's relative path inside the directory is preserved for roundtrip.
     """
@@ -230,15 +231,23 @@ def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
 
     tensors = {}
     raw_files = {}  # non-tensor files stored verbatim
+    symlinks = {}   # rel_path → target_path
+    file_times = {}  # rel_path → (mtime, atime)
     metadata = {"format": "safetensors", "source_dir": str(directory), "source_files": {}}
     directory = Path(directory).resolve()
 
     # Collect all files recursively
     for fp in sorted(directory.rglob("*")):
-        if fp.is_dir():
+        st = fp.lstat()  # lstat to detect symlinks
+        if fp.is_dir() and not fp.is_symlink():
             continue
         rel = str(fp.relative_to(directory))
-        if fp.suffix in (".safetensors",):
+        file_times[rel] = (st.st_mtime, st.st_atime)
+
+        if fp.is_symlink():
+            symlinks[rel] = os.readlink(fp)
+            metadata["source_files"][rel] = []
+        elif fp.suffix in (".safetensors",):
             metadata["source_files"][rel] = []
             with safe_open(fp, framework="pt") as f:
                 for key in f.keys():
@@ -248,11 +257,13 @@ def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
                     tensors[key] = t.cpu().numpy()
                     metadata["source_files"][rel].append(key)
         else:
-            # Compress ANY non-tensor file: configs, images, PDFs, etc.
             with open(fp, "rb") as rf:
                 raw_files[rel] = rf.read()
             metadata["source_files"][rel] = []  # no tensors, raw blob
 
+    metadata["file_times"] = file_times
+    if symlinks:
+        metadata["symlinks"] = symlinks
     if raw_files:
         metadata["raw_files_data"] = {}
         import zstandard as _zstd
@@ -261,7 +272,6 @@ def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
             compressed = cctx.compress(data)
             orig_path = directory / rel
             metadata["raw_files_data"][rel] = (compressed, orig_path.stat().st_mode & 0o777)
-        # Keep raw_files metadata for listing (original sizes)
         metadata["raw_files"] = {rel: len(data) for rel, data in raw_files.items()}
     if "config.json" in raw_files:
         try:
@@ -288,7 +298,9 @@ def _load_safetensors_file(path: Path) -> Tuple[Dict, Dict]:
             tensors[key] = t.cpu().numpy()
             tensor_names.append(key)
 
-    return tensors, {"format": "safetensors", "source_files": {path.name: tensor_names}}
+    st = path.lstat()
+    return tensors, {"format": "safetensors", "source_files": {path.name: tensor_names},
+                     "file_times": {path.name: (st.st_mtime, st.st_atime)}}
 
 
 def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
@@ -319,6 +331,9 @@ def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
                 metadata[key] = value
 
     metadata["source_files"] = {path.name: tensor_names}
+    st = path.lstat() if isinstance(path, Path) else Path(str(path)).lstat()
+    metadata["file_times"] = {path.name if isinstance(path, Path) else Path(str(path)).name:
+                               (st.st_mtime, st.st_atime)}
     return tensors, metadata
 
 
@@ -333,7 +348,10 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
         n_tensors = struct.unpack("<Q", f.read(8))[0]
         n_kv = struct.unpack("<Q", f.read(8))[0]
 
-        metadata = {"format": "gguf", "version": version, "n_tensors": n_tensors, "kv_pairs": {}, "source_files": {str(path): []}}
+        st = Path(str(path)).lstat()
+        metadata = {"format": "gguf", "version": version, "n_tensors": n_tensors, "kv_pairs": {},
+                    "source_files": {str(Path(str(path)).name): []},
+                    "file_times": {str(Path(str(path)).name): (st.st_mtime, st.st_atime)}}
 
         # Read key-value pairs
         for _ in range(n_kv):
@@ -737,20 +755,22 @@ def main():
         raw_compressed = h.get("raw_files", {})
 
         # Gather per-file info
-        entries = []  # (name, original_size, compressed_size, kind, mode)
+        symlinks = src_meta.get("symlinks", {})
+        file_times = src_meta.get("file_times", {})
+        entries = []  # (name, original_size, compressed_size, kind, mode, mtime)
         for fname, tnames in sorted(src_files.items()):
-            kind = "tensor" if tnames else "file"
-            # Get compressed size
+            kind = "symlink" if fname in symlinks else ("tensor" if tnames else "file")
             comp_size = 0
-            if tnames:
+            if kind == "symlink":
+                comp_size = len(symlinks[fname].encode())
+            elif tnames:
                 for n in tnames:
                     if n in h.get("tensors", {}):
                         comp_size += h["tensors"][n].get("size", 0)
             else:
                 comp_size = raw_compressed.get(fname, {}).get("size", 0)
-            # Get original size
-            orig_size = raw_original.get(fname, 0) if not tnames else 0
-            if not orig_size and tnames:
+            orig_size = raw_original.get(fname, 0) if kind == "file" else 0
+            if not orig_size and kind == "tensor":
                 for n in tnames:
                     e = h["tensors"].get(n, {})
                     s = e.get("shape", [])
@@ -760,26 +780,29 @@ def main():
                     for dim in s:
                         nelem *= dim
                     orig_size += nelem * elsize
-            # Get mode
-            if tnames:
-                mode = "644"  # default for tensor files
+            if kind == "tensor":
+                mode = "644"
+            elif kind == "symlink":
+                mode = "777"  # symlink perms are from target
             else:
                 mode = oct(raw_compressed.get(fname, {}).get("mode", 0o644))[2:]
-            entries.append((fname, orig_size, comp_size, kind, mode))
+            mtime = file_times.get(fname, (0, 0))[0]
+            mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else ""
+            entries.append((fname, orig_size, comp_size, kind, mode, mtime_str))
 
         # Print table
         if entries:
-            print(f"{'Name':<40} {'Mode':>5} {'Original':>12} {'Compressed':>12} {'Ratio':>8}")
-            print(f"{'-'*40} {'-'*5} {'-'*12} {'-'*12} {'-'*8}")
+            print(f"{'Name':<38} {'Mode':>5} {'Modified':>16} {'Original':>12} {'Compressed':>12} {'Ratio':>8}")
+            print(f"{'-'*38} {'-'*5} {'-'*16} {'-'*12} {'-'*12} {'-'*8}")
             total_orig = total_comp = 0
-            for name, orig, comp, kind, mode in entries:
-                ratio = f"{comp/orig*100:.0f}%" if orig > 0 and comp <= orig else ("—" if orig == 0 else f"{comp/orig*100:.0f}%")
-                print(f"{name:<40} {mode:>5} {_fmt_bytes(orig) if orig>0 else '?':>12} {_fmt_bytes(comp):>12} {ratio:>8}")
+            for name, orig, comp, kind, mode, mtime_str in entries:
+                ratio = f"{comp/orig*100:.0f}%" if orig > 0 and comp <= orig else ("—" if orig <= 0 else f"{comp/orig*100:.0f}%")
+                print(f"{name:<38} {mode:>5} {mtime_str:>16} {_fmt_bytes(orig) if orig>0 else ('link' if kind=='symlink' else '?'):>12} {_fmt_bytes(comp):>12} {ratio:>8}")
                 total_orig += orig
                 total_comp += comp
             total_ratio = f"{total_comp/total_orig*100:.0f}%" if total_orig > 0 else "—"
-            print(f"{'─'*40} {'─'*5} {'─'*12} {'─'*12} {'─'*8}")
-            print(f"{'Total (' + str(len(entries)) + ' files)':<40} {'':>5} {_fmt_bytes(total_orig):>12} {_fmt_bytes(total_comp):>12} {total_ratio:>8}")
+            print(f"{'─'*38} {'─'*5} {'─'*16} {'─'*12} {'─'*12} {'─'*8}")
+            print(f"{'Total (' + str(len(entries)) + ' files)':<38} {'':>5} {'':>16} {_fmt_bytes(total_orig):>12} {_fmt_bytes(total_comp):>12} {total_ratio:>8}")
 
         # Summary
         ts = h.get("tensors", {})
@@ -846,6 +869,13 @@ def main():
                            str(out_path))
                 if verbose: print(f"  → {out_path}")
 
+        # Restore symlinks
+        for rel_path, target in sorted(src_meta.get("symlinks", {}).items()):
+            out_path = out_dir / rel_path
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.symlink_to(target)
+            if verbose: print(f"  → {out_path} -> {target}")
+
         # Restore raw (non-tensor) files
         import zstandard as _zstd
         dctx = _zstd.ZstdDecompressor()
@@ -861,6 +891,17 @@ def main():
                     if verbose:
                         print(f"  ⚠️  Cannot chmod {out_path} to {mode:o}: {e}")
             if verbose: print(f"  → {out_path}")
+
+        # Restore mtime/atime for all restored files (tensors + raw + symlinks)
+        file_times = src_meta.get("file_times", {})
+        for rel_path, (mtime, atime) in file_times.items():
+            out_path = out_dir / rel_path
+            if out_path.exists(follow_symlinks=False):
+                try:
+                    os.utime(out_path, (atime, mtime), follow_symlinks=False)
+                except (PermissionError, OSError) as e:
+                    if verbose:
+                        print(f"  ⚠️  Cannot utime {out_path}: {e}")
 
         # Restore config.json if we had one at top level
         config = src_meta.get("config")
