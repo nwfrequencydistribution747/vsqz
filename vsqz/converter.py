@@ -277,7 +277,8 @@ def _load_safetensors_dir(directory: Path) -> Tuple[Dict, Dict]:
         try:
             metadata["config"] = json.loads(raw_files["config.json"].decode("utf-8"))
         except Exception:
-            pass
+            # config.json may be invalid or binary — non-critical
+            pass  # noqa
 
     return tensors, metadata
 
