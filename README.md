@@ -15,6 +15,8 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 `pip install vsqz` — the `gzip` for AI models. Train 13B on a 12GB card. Fine-tune 20B on 24GB. Double your context window. 55% smaller files = 55% faster downloads, 55% less disk. Works on RTX to H100 — avoid unnecessary GPU upgrades.
 
+**Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
+
 > **v0.3.3 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
