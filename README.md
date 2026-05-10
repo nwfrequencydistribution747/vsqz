@@ -1,6 +1,11 @@
-# vsqz — VRAMSqueeze: VRAM & File Compression for AI-Models
+# vsqz — VRAMSqueeze: VRAM & File Compression for AI Models
+
+Tired of **CUDA Out of Memory (OOM)** errors during LLM fine-tuning? Is your disk getting full, but you don't want to delete models? Are your checkpoints too large to share or upload to the cloud? Want to run **local AI** but lack the required VRAM? 
+
+`vsqz` solves this.
 
 **One file. Half the VRAM. Double the model.**
+
 
 [![PyPI version](https://img.shields.io/pypi/v/vsqz)](https://pypi.org/project/vsqz/)
 [![tests](https://img.shields.io/badge/tests-41%2F1%20skipped-green)](https://github.com/butterwecksolutions/vsqz/actions)
