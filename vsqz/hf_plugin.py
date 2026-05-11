@@ -77,9 +77,11 @@ def _read_vvsqz_header(path: str) -> Tuple[Dict, Dict[str, bytes], int]:
 
 
 def _sqz_tensor_name_to_hf(name: str) -> str:
-    """Convert .vsqz tensor name to HuggingFace parameter name."""
-    if name.startswith("weight_"):
-        return name[7:].replace("_", ".")
+    """Convert .vsqz tensor name to HuggingFace parameter name.
+
+    .vsqz stores tensor names as-is from the source. No conversion needed
+    for safetensors/GGUF sources — names already match HF convention.
+    """
     return name
 
 
@@ -127,10 +129,9 @@ def load_vvsqz_model(model_class_or_path: str, vsqz_path: Optional[str] = None, 
     state_dict = {}
     for name, entry in header["tensors"].items():
         hf_name = _sqz_tensor_name_to_hf(name)
-        if hf_name == name and name.startswith("weight_"):
-            hf_name = hf_name
-        if not name.startswith("weight_"):
-            continue  # Skip non-weight tensors (optimizer states etc.)
+        # Skip metadata-only entries (no tensor data)
+        if entry.get("shape") is None or len(entry.get("shape", [])) == 0:
+            continue
         tensor = _bytes_to_tensor(tensor_data[name], entry["dtype"], entry["shape"])
         state_dict[hf_name] = tensor
 
@@ -157,6 +158,10 @@ def load_vvsqz_model(model_class_or_path: str, vsqz_path: Optional[str] = None, 
 
     torch_dtype = kwargs.pop("torch_dtype", torch.float16)
     model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype, **kwargs)
+    if model is None:
+        # Fallback: create from config directly
+        from transformers import PreTrainedModel
+        model = PreTrainedModel(config)
     model.load_state_dict(state_dict, strict=False)
 
     return model
@@ -187,12 +192,14 @@ def patch_huggingface() -> bool:
     def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         path = str(pretrained_model_name_or_path)
 
-        # Check if this is a .vsqz file
+        # Check if the path points to a .vsqz file
         vsqz_file = _find_vvsqz_file(path)
 
         if vsqz_file is None:
             # Not .vsqz — use original behavior
             return _orig_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs)
+
+        # ── .vsqz path: bypass HF Hub resolution entirely ──
 
         # Load from .vsqz
         header, tensor_data, _ = _read_vvsqz_header(str(vsqz_file))
@@ -200,33 +207,43 @@ def patch_huggingface() -> bool:
         # Build state dict
         state_dict = {}
         for name, entry in header["tensors"].items():
-            if not name.startswith("weight_"):
+            if entry.get("shape") is None or len(entry.get("shape", [])) == 0:
                 continue
             hf_name = _sqz_tensor_name_to_hf(name)
             tensor = _bytes_to_tensor(tensor_data[name], entry["dtype"], entry["shape"])
             state_dict[hf_name] = tensor
 
-        # Get config
+        # Get config: from same directory, or from .vsqz header
         config = kwargs.pop("config", None)
         if config is None:
             from transformers import AutoConfig
-            # Try loading config from same directory
             cfg_dir = str(vsqz_file.parent)
             if (vsqz_file.parent / "config.json").exists():
                 config = AutoConfig.from_pretrained(cfg_dir)
             else:
                 model_cfg = header.get("model_config", {})
-                config = AutoConfig.from_pretrained(model_cfg.get("arch", ""))
+                arch = model_cfg.get("arch", "")
+                if arch:
+                    try:
+                        config = AutoConfig.from_pretrained(arch)
+                    except Exception:
+                        pass
                 if config is None or not hasattr(config, 'hidden_size'):
                     raise ValueError(
                         "Cannot determine model architecture from .vsqz file. "
-                        "Place a config.json next to the .vsqz file."
+                        "Place a config.json next to the .vsqz file, "
+                        "or pass config=AutoConfig.from_pretrained('model-name')."
                     )
 
-        # Create model and load weights
-        torch_dtype = kwargs.pop("torch_dtype", torch.float16)
-        model = cls(config, *args, **kwargs)
-        model.load_state_dict(state_dict, strict=False)
+        # Create model (config-only, no Hub lookup)
+        torch_dtype = kwargs.pop("torch_dtype", kwargs.pop("dtype", torch.float16) if "dtype" in kwargs else torch.float16)
+        if hasattr(cls, 'from_config'):
+            model = cls.from_config(config, torch_dtype=torch_dtype)
+        else:
+            model = cls(config)
+            if torch_dtype in (torch.float16, torch.bfloat16):
+                model = model.to(torch_dtype)
+        model.load_state_dict(state_dict, strict=False, assign=True)
 
         logger.info(
             "Loaded model from .vsqz: %s (%d params)",
@@ -235,11 +252,42 @@ def patch_huggingface() -> bool:
         return model
 
     PreTrainedModel.from_pretrained = _patched_from_pretrained
+
+    # Also patch AutoModel factory entry points (AutoModelForCausalLM etc.)
+    try:
+        from transformers import AutoModelForCausalLM as _AMCLM, AutoModel as _AM
+        _orig_amclm_fp = _AMCLM.from_pretrained
+        _orig_am_fp = _AM.from_pretrained
+
+        def _make_auto_patch(orig_fn):
+            @classmethod
+            def _patched(cls, pretrained_model_name_or_path, *a, **kw):
+                path = str(pretrained_model_name_or_path)
+                vsqz_file = _find_vvsqz_file(path)
+                if vsqz_file is None:
+                    return orig_fn.__func__(cls, pretrained_model_name_or_path, *a, **kw)
+                # Config from same dir, then delegate to PreTrainedModel patch
+                from transformers import AutoConfig
+                config = AutoConfig.from_pretrained(str(vsqz_file.parent))
+                kw["config"] = config
+                model_cls = cls._model_mapping[type(config)]
+                return model_cls.from_pretrained(pretrained_model_name_or_path, *a, **kw)
+
+            return _patched
+
+        _AMCLM.from_pretrained = _make_auto_patch(_orig_amclm_fp)
+        _AM.from_pretrained = _make_auto_patch(_orig_am_fp)
+    except Exception:
+        pass
+
     _PATCHED = True
 
     logger.info("✅ .vsqz HuggingFace plugin activated — AutoModel.from_pretrained('model.vsqz') works")
     return True
 
 
-# Explicit activation: `import vsqz.hf_plugin; vsqz.hf_plugin.activate()`
-patch_huggingface()
+# Auto-activate on import (safe: fails silently if transformers not installed)
+try:
+    patch_huggingface()
+except Exception as e:
+    logger.debug("HF plugin auto-activation skipped: %s", e)

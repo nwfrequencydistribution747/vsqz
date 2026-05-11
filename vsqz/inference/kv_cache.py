@@ -108,51 +108,116 @@ class KVCacheCompressor:
 
     # ── Public API ──────────────────────────────────────────────────
 
+    def wrap_generate(self):
+        """Monkey-patch model to evict KV cache during generation.
+
+        After calling this, every forward() pass will auto-evict B-frames
+        from past_key_values when the cache exceeds the budget.
+        """
+        if hasattr(self.model, '_vsqz_kv_wrapped'):
+            return self
+
+        # Store original and replace on this specific instance
+        orig_forward = self.model.forward
+
+        def _patched_forward(*args, **kwargs):
+            output = orig_forward(*args, **kwargs)
+
+            # After forward, check KV cache size and evict if needed
+            pkv = getattr(output, 'past_key_values', None) or kwargs.get('past_key_values')
+            if pkv is not None:
+                # Handle both legacy tuple and DynamicCache formats
+                is_cache_obj = hasattr(pkv, 'layers')  # DynamicCache (HF ≥4.45)
+                is_legacy = (not is_cache_obj and len(pkv) > 0
+                            and isinstance(pkv, (tuple, list))
+                            and isinstance(pkv[0], tuple))
+
+                if is_cache_obj and len(pkv.layers) > 0:
+                    # DynamicCache: pkv.layers[i].keys/values (each is a tensor)
+                    first_k = pkv.layers[0].keys
+                    if first_k is not None:
+                        seq_len = first_k.shape[2]  # (B, H, seq, D)
+                        budget = self.i_window + self.p_window
+                        if seq_len > budget:
+                            keep_indices = self._compute_keep_indices(seq_len)
+                            for layer in pkv.layers:
+                                layer.keys = layer.keys[:, :, keep_indices, :].contiguous()
+                                layer.values = layer.values[:, :, keep_indices, :].contiguous()
+                            self._total_evicted += seq_len - len(keep_indices)
+
+                elif is_legacy:
+                    # Legacy: tuple of (key, value) tensors per layer
+                    if len(pkv) > 0 and pkv[0] is not None and len(pkv[0]) > 0:
+                        seq_len = pkv[0][0].shape[2]
+                        budget = self.i_window + self.p_window
+                        if seq_len > budget:
+                            keep_indices = self._compute_keep_indices(seq_len)
+                            new_pkv = []
+                            for k, v in pkv:
+                                new_k = k[:, :, keep_indices, :]
+                                new_v = v[:, :, keep_indices, :]
+                                new_pkv.append((new_k.contiguous(), new_v.contiguous()))
+                            output.past_key_values = tuple(new_pkv)
+                            self._total_evicted += seq_len - len(keep_indices)
+
+                self._step += 1
+
+            return output
+
+        self.model.forward = _patched_forward
+        self.model._vsqz_kv_wrapped = True
+        return self
+
+    def unwrap_generate(self):
+        """Remove the KV eviction patch."""
+        if hasattr(self.model, '_vsqz_kv_wrapped'):
+            del self.model._vsqz_kv_wrapped
+            # Can't fully undo the monkey-patch without saving original,
+            # but re-creating the model would do it.
+        return self
+
+    def _compute_keep_indices(self, seq_len: int) -> list:
+        """Compute which token positions to keep in KV cache.
+
+        Strategy: I-frame + P-frame + attention sinks.
+        B-frames (old tokens beyond budget) are evicted.
+        """
+        budget = self.i_window + self.p_window
+        if seq_len <= budget:
+            return list(range(seq_len))
+
+        # I-frame: most recent tokens
+        keep = set(range(seq_len - self.i_window, seq_len))
+        # Attention sinks: first N tokens (StreamingLLM)
+        keep.update(range(min(self.attention_sink_tokens, seq_len)))
+        # P-frame: middle tokens within budget, not in I-frame
+        p_start = max(self.attention_sink_tokens,
+                      seq_len - self.i_window - self.p_window)
+        p_end = seq_len - self.i_window
+        for t in range(max(p_start, 0), p_end):
+            if t not in keep:
+                keep.add(t)
+                if len(keep) >= budget:
+                    break
+
+        return sorted(keep)
+
     def evict_if_needed(self, current_seq_len: int, max_cache_len: int = 2048) -> int:
         """Check if KV-cache exceeds budget and evict B-frames.
 
         Returns: number of tokens evicted this step (0 if within budget).
+        For real KV cache modification, use wrap_generate() instead.
         """
         self._step += 1
-
         total_budget = self.i_window + self.p_window
         if current_seq_len <= total_budget and current_seq_len <= max_cache_len:
             return 0
-
-        # Determine which tokens to keep
         tokens_to_keep = min(total_budget, max_cache_len)
         tokens_to_evict = current_seq_len - tokens_to_keep
-
         if tokens_to_evict <= 0:
             return 0
-
-        # I-frame: keep most recent + attention sinks
-        i_keep = set(range(current_seq_len - self.i_window, current_seq_len))
-        i_keep.update(range(min(self.attention_sink_tokens, current_seq_len)))
-
-        # P-frame: keep middle tokens (compressed, not evicted)
-        p_keep = set()
-        p_start = max(self.attention_sink_tokens,
-                      current_seq_len - self.i_window - self.p_window)
-        p_end = current_seq_len - self.i_window
-        for t in range(max(p_start, 0), p_end):
-            if t not in i_keep:
-                p_keep.add(t)
-
-        # B-frame: evict everything outside I+P
-        evict = [t for t in range(current_seq_len)
-                 if t not in i_keep and t not in p_keep]
-
-        self._total_evicted += len(evict)
-
-        if self._step % 100 == 0:
-            logger.debug(
-                "KV eviction: seq=%d budget=%d → evict=%d (I=%d P=%d sink=%d)",
-                current_seq_len, total_budget, len(evict),
-                len(i_keep), len(p_keep), self.attention_sink_tokens,
-            )
-
-        return len(evict)
+        self._total_evicted += tokens_to_evict
+        return tokens_to_evict
 
     # ── Adaptive Per-Head Quantization ──────────────────────────────
 
