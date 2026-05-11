@@ -81,6 +81,7 @@ def main():
     do_serve = parsed.serve
     do_rediff = parsed.rediff
     do_mmproj = parsed.mmproj
+    server_port = parsed.port
     recursive = parsed.recursive
     split_val = parsed.split
     exclude_pats = parsed.exclude
@@ -108,7 +109,19 @@ def main():
 
     # ── Serve ───────────────────────────────────────────────────────
     if do_serve and source:
-        _do_serve(source, parsed.args, verbose)
+        deltas = [a for a in parsed.args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
+        if not deltas:
+            print("Usage: vsqz --serve base_model delta1.vsqz [delta2.vsqz ...]")
+            print("       vsqz --serve base_model delta1.vsqz --status")
+            print("       vsqz --serve base_model delta1.vsqz --port 8081")
+            sys.exit(1)
+
+        if server_port > 0:
+            from .server import serve_models
+            serve_models(source, deltas, base_port=server_port)
+            import signal; signal.pause()
+        else:
+            _do_serve(source, parsed.args, verbose)
         return
 
     # ── Rediff ──────────────────────────────────────────────────────
