@@ -8,7 +8,7 @@ import torch
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vsqz.converter import _compute_delta, _load_source
+from vsqz.converter_io import _compute_delta, _load_source
 
 
 @pytest.fixture

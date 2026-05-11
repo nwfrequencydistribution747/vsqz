@@ -1,6 +1,6 @@
 """Tests for .vsqz integrity — SHA-256 + Recovery Record."""
 import pytest, tempfile, torch, os, sys
-from vsqz.converter import convert_to_vsqz
+from vsqz.converter_core import convert_to_vsqz
 from vsqz.vsqz_format import _read_vsqz, peek_vsqz
 
 class TestSHA256:

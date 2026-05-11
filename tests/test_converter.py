@@ -1,6 +1,7 @@
 """Tests for vsqz converter (model compression with no trading deps)"""
 import pytest, tempfile, os, torch, torch.nn as nn
-from vsqz.converter import convert_to_vsqz, _fmt_bytes
+from vsqz.converter_core import convert_to_vsqz
+from vsqz.converter_io import _fmt_bytes
 
 class TinyModel(nn.Module):
     def __init__(self): super().__init__(); self.a = nn.Linear(32,16); self.b = nn.Linear(16,8)
