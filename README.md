@@ -261,9 +261,9 @@ print(f'Verdict: Safe to delete original')
 
 ```python
 from transformers import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Just works
+model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Preview
 ```
-No conversion needed — `.vsqz` loads directly as a HuggingFace model.
+🧪 HF plugin included — manual setup required. Full AutoModel integration in v0.4.1.
 
 ### Training (HuggingFace / Axolotl)
 
