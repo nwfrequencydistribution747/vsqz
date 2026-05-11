@@ -58,6 +58,10 @@ python -m vsqz -l model.vsqz
 vsqz --diff  qwen.vsqz qwopus.gguf -o qwopus-delta.vsqz   # store only changed weights
 vsqz --serve qwen.vsqz qwopus-delta.vsqz ablit-delta.vsqz # 3 models, base once
 
+# Extract vision/audio encoder (all VL archs, legacy .gguf or .vsqz)
+vsqz --mmproj model/ -o mmproj.gguf     # llama.cpp compatible
+vsqz --mmproj model/ -o mmproj.vsqz     # compressed archive
+
 # Training: wrap your optimizer, save VRAM  
 from vsqz import VRAMSqueeze
 squeezer = VRAMSqueeze(model, optimizer=opt, preset="13B_24GB")
