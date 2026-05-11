@@ -35,6 +35,14 @@ def _do_diff(source, variant, extra_output, verbose):
     if variant.endswith('.vsqz'):
         variant_path = _auto_rejoin_split(variant_path)
 
+    # ── Streaming diff path (GGUF/.vsqz variant) ──
+    if variant.endswith('.gguf') or variant.endswith('.vsqz'):
+        from .stream_diff import stream_diff
+        result = stream_diff(source, variant, delta_out, verbose=verbose)
+        if result["delta_count"] == 0 and verbose:
+            print("  ✅ Models identical — no delta needed.")
+        return
+
     from .vsqz_format import _read_vsqz
     bh, bt = _read_vsqz(str(source_path), verify_sha256=True)
     base_tensors = {}

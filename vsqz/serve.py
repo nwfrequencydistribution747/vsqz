@@ -45,7 +45,12 @@ class ModelSwarm:
                 d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(
                     e.get("dtype", "float16"), np.float16)
                 self._base_tensors[name] = np.frombuffer(td[name], dtype=d).reshape(e["shape"])
-        elif self.base_path.is_dir() or self.base_path.suffix in (".safetensors", ".gguf", ".bin", ".pt", ".pth"):
+        elif base_src.endswith('.gguf'):
+            # Use streaming GGUF reader — max 1 tensor in RAM
+            from .stream_diff import _stream_gguf
+            for name, tensor in _stream_gguf(base_src):
+                self._base_tensors[name] = tensor
+        elif self.base_path.is_dir() or self.base_path.suffix in (".safetensors", ".bin", ".pt", ".pth"):
             self._base_tensors, _ = _load_source(self.base_path)
         else:
             raise ValueError(f"Unsupported base format: {base_src}")
