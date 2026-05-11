@@ -13,9 +13,9 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/butterwecksolutions/vsqz/blob/main/LICENSE)
 [![Sponsor](https://img.shields.io/badge/sponsor-VSQZ%20unterst%C3%BCtzen-ff69b4)](https://github.com/sponsors/butterwecksolutions)
 
-`pip install vsqz` — the `gzip` for AI models. Train 13B on a 12GB card. Fine-tune 20B on 24GB. Double your context window. 55% smaller files = 55% faster downloads, 55% less disk. Works on RTX to H100 — avoid unnecessary GPU upgrades.
+`pip install vsqz` — the `gzip` for AI models. 55% smaller files. Full archiver: directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch. VRAM training optimizers (GaLore, Q-GaLore, LISA) for 9B→12GB QLoRA.
 
-**Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
+**Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats (llama.cpp, etc.).
 
 > 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
 > 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
@@ -31,7 +31,8 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
 > Wrong base → rejected. Same base from any source (GGUF/safetensors/PT) → accepted.
 
-> **v0.3.4 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
+> **v0.3.5 — stable.** Full archiver (tar-level fidelity): compress, decompress, list, verify. Roundtrip-safe
+> for safetensors, GGUF, PyTorch. Training optimizers (GaLore, LISA, Q-GaLore) in beta. Inference features on roadmap.
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
 
@@ -113,7 +114,8 @@ same files, same directory structure, same permissions.
 |--------|----------|------|-------------|---------|
 | safetensors (9B) | 18 GB | 8 GB | 7 GB | **61%** |
 | GGUF F16 (9B) | 18 GB | 8 GB | 7 GB | **61%** |
-| PyTorch Checkpoint | 20 GB | 15 MB | 12 MB | **99.4%** |
+| PyTorch Checkpoint (w/ AdamW) | 56 GB | 18 GB | 16 GB | **71%** |
+| PyTorch Checkpoint (weights only) | 18 GB | 8 GB | 7 GB | **61%** |
 | **ALL THREE → single .vsqz.zst** | **56 GB** | **8 GB** | **7 GB** | **87%** |
 
 ---
@@ -141,7 +143,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 |---------|--------|-------------|---------|
 | **FP16 Compression** | IEEE 754 | FP32→FP16 weight storage | 50% |
 | **zstd Post-Compress** | Facebook | 5-15% extra on top of FP16 | 5-15% |
-| **AdamW Stripping** | vsqz | Remove optimizer dead weight | 99% |
+| **AdamW Stripping** | vsqz | Drop Momentum+Variance states | ~66% of checkpoint |
 | **SHA-256** | NIST | Cryptographic integrity | – |
 | **Recovery Record** | RAR | Self-repairing header | – |
 | **KV-Cache H.264** | StreamingLLM | I/P/B-frame token eviction | 2× context |
@@ -200,7 +202,7 @@ done
 vsqz -kzs 8G large-model/       → .001, .002, ... .zst (compressed chunks)
 
 # Clean checkpoint (strip AdamW, compress, keep original)
-vsqz -kx adam pytorch_model.bin  → weights only, 99% smaller
+vsqz -kx adam pytorch_model.bin  → strip AdamW states, keep weights
 
 # Download once, compress, delete original
 vsqz model.safetensors          → model.safetensors.vsqz (no raw left)
@@ -225,19 +227,20 @@ vsqz --diff mistral.vsqz llama.vsqz -o cross.vsqz      # any shared embeddings?
 vsqz -dv model.vsqz.zst
 ```
 
-### How `--serve` works under the hood (Static Sharing)
+### How `--diff` / `--serve` work (v0.4.0-dev)
 
-`--serve` doesn't use complex CUDA hot-swapping or custom dispatchers. It leverages
-native PyTorch memory sharing:
+`--diff` is **production-ready**: loads two models, compares tensors, stores only
+the differing weights. SHA-verified, self-describing, cross-format.
 
-1. **Base tensors** are loaded into VRAM once.
-2. **Each delta** is a sparse state-dict — only the layers that differ from base.
-3. For each delta, changed layers are replaced, unchanged layers **reference the
-   base tensors** directly (same Python object, same memory pointer).
-4. Result: 5 models sharing 90%+ of their memory — simple, native, robust.
+`--serve` is **preview**: loads shared tensors into Python dicts and measures VRAM.
+For actual multi-model inference, each model needs to be wrapped in a PyTorch
+state-dict with `model.load_state_dict()`. Full HuggingFace integration (`AutoModel`)
+is planned for v0.4.1.
 
-**Dynamic multiplexing (Stage 2)** — hot-swapping deltas mid-inference,
-KV-cache page-switching per model — is on the roadmap.
+```
+Current:  --serve → shared dicts → measure VRAM (preview)
+v0.4.1:   --serve → AutoModel.load_state_dict → model.generate() (inference)
+```
 
 ---
 
