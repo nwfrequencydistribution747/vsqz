@@ -70,7 +70,7 @@ squeezer = VRAMSqueeze(model, optimizer=opt, preset="13B_24GB")
 | RTX 3090 | 24 GB | ✅ b=4 | ✅ b=4 | ✅ b=3 | ✅ b=1 |
 | RTX 4090 | 24 GB | ✅ b=4 | ✅ b=4 | ✅ b=4 | ✅ b=2 |
 
-*Without vsqz: 9B max, no 13B or 20B on any consumer GPU.*
+*Compare: QLoRA baseline vs vsqz-optimized VRAM on consumer GPUs.*
 
 ### Inference (Context Window Doubling via KV-Cache Compression)
 
@@ -325,7 +325,7 @@ Stacks FP16 + zstd + AdamW stripping. Optimal for long-term storage, cloud uploa
 | Step | What happens | Size reduction |
 |------|-------------|---------------|
 | 1. FP32→FP16 | Half-precision weights | 2× |
-| 2. AdamW Strip | Remove optimizer states | 99%+ |
+| 2. AdamW Strip | Remove momentum+variance (2× model size) | ~66% of ckpt |
 | 3. zstd | Post-compression | 5-15% extra |
 | **Combined** | **Archive grade** | **87% vs all three formats** |
 
@@ -375,8 +375,8 @@ Every PR gets an automated review (imports, stubs, extensions, tests, paths, REA
 |--|------|-------------|------|
 | Training | ❌ | ✅ | ✅ |
 | Inference | ✅ | ❌ | ✅ |
-| Optimizer State | ❌ | ❌ | 15 MB |
-| Context Expansion | ❌ | ❌ | 2× |
+| Optimizer State | ❌ | ❌ | stripped |
+| Context Expansion | ❌ | ❌ | beta |
 | File Size (9B) | 18 GB | 18 GB | 8 GB |
 | zstd Archive | ❌ | ❌ | ✅ (-z, +15%) |
 | Faster Downloads | ❌ | ❌ | ✅ 55% smaller |
