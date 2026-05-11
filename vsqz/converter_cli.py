@@ -117,8 +117,10 @@ def main():
         return
 
     # ── mmproj ──────────────────────────────────────────────────────
+    # Optional: vsqz --mmproj base.vsqz delta.vsqz -o mmproj.gguf
     if do_mmproj and source:
-        _do_mmproj(source, extra_output or output, verbose)
+        delta_file = output if output and (output.endswith('.delta.vsqz') or '.delta.vsqz' in output) else None
+        _do_mmproj(source, extra_output, delta=delta_file, verbose=verbose)
         return
 
     # Handle .vsqz.zst transparently (decompress first)

@@ -330,19 +330,51 @@ def _do_decompress(source, output, keep, verbose):
             os.remove(source)
 
 
-def _do_mmproj(source, output, verbose=False):
+def _do_mmproj(source, output, delta=None, verbose=False):
     """Extract vision/audio encoder subset as GGUF (mmproj replacement).
 
     Works for any VL/audio model: Qwen-VL, LLaVA, Phi-4-Vision-Audio, etc.
-    No HF conversion needed — pure tensor name filtering.
+    If a delta file is provided, merges base+delta before filtering.
+    If vision tensors are unchanged in delta, skips delta loading (fast path).
     """
     if not output:
-        output = source + "-mmproj.gguz" if source.endswith('.vsqz') else source.rstrip('/') + '-mmproj.gguf'
+        suffix = "-mmproj.gguf" if not source.endswith('.vsqz') else "-mmproj.gguf"
+        output = source.replace('.vsqz', suffix) if source.endswith('.vsqz') else source.rstrip('/') + '-mmproj.gguf'
 
     if verbose: print(f"Extracting mmproj: {source} → {output}")
 
     # Load source (HF dir, .vsqz, .gguf, .safetensors)
-    tensors, meta = _load_source(Path(source))
+    source_path = Path(source)
+    if source.endswith('.vsqz'):
+        from .vsqz_format import _read_vsqz
+        h, td = _read_vsqz(str(source_path), verify_sha256=False)
+        tensors = {}
+        for n in sorted(h["tensors"]):
+            e = h["tensors"][n]
+            d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
+            tensors[n] = np.frombuffer(td[n], dtype=d).reshape(e["shape"])
+    else:
+        tensors, _ = _load_source(source_path)
+
+    # Smart delta handling: only load delta if vision tensors changed
+    if delta and (Path(delta).suffix == '.vsqz' or '.delta.vsqz' in str(delta)):
+        from .vsqz_format import _read_vsqz
+        dh, dd = _read_vsqz(str(delta))
+        if dh.get("delta"):
+            # Check if delta touches any vision tensor
+            has_vision_delta = any(
+                any(name.lower().startswith(p) for p in _VL_PREFIXES)
+                for name in dh.get("tensors", {})
+            )
+            if has_vision_delta:
+                if verbose: print("  Delta modifies vision tensors — merging...")
+                for name in sorted(dd):
+                    e = dh["tensors"][name]
+                    d_dt = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
+                    tensors[name] = np.frombuffer(dd[name], dtype=d_dt).reshape(e["shape"])
+            elif verbose:
+                print("  Vision tensors unchanged in delta — using base only (fast path)")
+
     vision = _filter_vision_tensors(tensors)
 
     if not vision:
@@ -355,7 +387,7 @@ def _do_mmproj(source, output, verbose=False):
         print(f"  Vision tensors: {len(vision)} ({_fmt_bytes(total)})")
 
     # Write as GGUF
-    gguf_meta = {"format": "gguf", "tensor_infos": [], "kv_pairs": {},
+    gguf_meta = {"format": "gguf", "tensor_infos": [], "kv_pairs": [],
                  "version": 3, "source_files": {"mmproj.gguf": list(vision.keys())}}
     _save_gguf(Path(output), vision, gguf_meta, verbose=verbose)
 
