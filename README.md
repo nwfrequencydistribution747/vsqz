@@ -20,7 +20,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > 🔥 **New in v0.4.0: Multi-model delta sharing.** `--diff` stores only the weights
 > that changed between a base model and its fine-tune. Self-describing, SHA-verified,
 > format-agnostic. `--serve` (preview) shares base tensors + measures VRAM savings.
-> Full multi-model inference in v0.4.1. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
+> Full multi-model inference in v0.5. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
 >
 > ```
 > vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
@@ -234,11 +234,11 @@ the differing weights. SHA-verified, self-describing, cross-format.
 `--serve` is **preview**: loads shared tensors into Python dicts and measures VRAM.
 For actual multi-model inference, each model needs to be wrapped in a PyTorch
 state-dict with `model.load_state_dict()`. Full HuggingFace integration (`AutoModel`)
-is planned for v0.4.1.
+is planned for v0.5.
 
 ```
 Current:  --serve → shared dicts → measure VRAM (preview)
-v0.4.1:   --serve → AutoModel.load_state_dict → model.generate() (inference)
+v0.5:    --serve → AutoModel.load_state_dict → model.generate() (inference)
 ```
 
 ---
