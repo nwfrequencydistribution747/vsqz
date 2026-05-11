@@ -52,7 +52,7 @@ try:
 except Exception:
     pass  # HF not installed — .vsqz loading works via vsqz_format directly
 
-__version__ = "0.4.0"
+__version__ = "0.5.0.dev0"
 __all__ = [
     "VRAMSqueeze",
     "KVCacheCompressor",
