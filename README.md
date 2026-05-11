@@ -25,7 +25,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` â€
 >
 > ```
 > vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
-> vsqz --serve qwen-base.gguf qwopus-delta.vsqz huihui-delta.vsqz  # base once, rest on top
+> vsqz --serve qwen-base.vsqz qwopus-delta.vsqz huihui-delta.vsqz  # base once, rest on top
 > ```
 >
 > `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
