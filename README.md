@@ -17,10 +17,10 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 **Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats (llama.cpp, etc.).
 
-> 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
-> 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
-> VRAM of 1. Self-describing, SHA-verified, format-agnostic.
-> `--diff` is production-ready. `--serve` shares tensors + measures VRAM (full inference in v0.4.1).
+> 🔥 **New in v0.4.0: Multi-model delta sharing.** `--diff` stores only the weights
+> that changed between a base model and its fine-tune. Self-describing, SHA-verified,
+> format-agnostic. `--serve` (preview) shares base tensors + measures VRAM savings.
+> Full multi-model inference in v0.4.1. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
 >
 > ```
 > vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
