@@ -42,11 +42,21 @@ def _status_banner(swarm: ModelSwarm, ports: List[int]) -> str:
         f"  YOU SAVED:    {_fmt_bytes(saved)} ({pct:.0f}%)",
         f"",
     ]
+    # Per-model savings table
+    name_w = max(len(n) for n in swarm.models) + 2
+    lines.append(f"  {'Model':<{name_w}} {'Original':>10} {'vsqz':>10} {'Saved':>7}")
+    lines.append(f"  {'-'*name_w} {'-'*10} {'-'*10} {'-'*7}")
+    for i, name in enumerate(swarm.models):
+        msize = sum(t.nbytes for t in swarm._models[name].values())
+        m_orig = base_original
+        m_saved = m_orig - msize
+        m_pct = m_saved / m_orig * 100 if m_orig > 0 else 0
+        tag = "base" if i == 0 else "delta"
+        lines.append(f"  {name:<{name_w}} {_fmt_bytes(m_orig):>10} {_fmt_bytes(msize):>10} {m_pct:.0f}% ({tag})")
+    lines.append("")
     for i, name in enumerate(swarm.models):
         port = ports[i] if i < len(ports) else "—"
-        size = sum(t.nbytes for t in swarm._models[name].values())
-        tag = "base" if i == 0 else "delta"
-        lines.append(f"  :{port:<5} → {name:<15} ({_fmt_bytes(size)}, {tag})")
+        lines.append(f"  :{port:<5} → {name} ({tag})")
     return "\n".join(lines)
 
 
