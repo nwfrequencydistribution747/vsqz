@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vsqz"
-version = "0.4.0"
+version = "0.4.1.dev0"
 description = "gzip for AI models — train 13B on 12GB, fine-tune 20B on 24GB. 55% smaller files, 2× longer context."
 readme = "README.md"
 requires-python = ">=3.10"
