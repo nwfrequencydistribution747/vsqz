@@ -737,6 +737,45 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+def _auto_rejoin_split(path: Path) -> Path:
+    """If 'path' is a split archive, auto-rejoin and return combined path.
+
+    Tries two naming conventions:
+    - path.001, path.002, ... (e.g., base.vsqz.001)
+    - prefix.001, prefix.002, ... (e.g., base.001 from split prefix 'base')
+    Returns original path if no split chunks found or if path already exists.
+    """
+    if path.exists():
+        return path
+
+    # Try convention 1: path.001 (e.g., model.vsqz.001)
+    first = Path(str(path) + ".001")
+    if first.exists():
+        chunks = sorted(path.parent.glob(path.name + ".*"))
+        if chunks:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".vsqz")
+            with open(tmp.name, "wb") as out:
+                for c in sorted(chunks):
+                    out.write(c.read_bytes())
+            return Path(tmp.name)
+
+    # Try convention 2: prefix.001 (e.g., base.001 from split prefix 'base')
+    stem = str(path).rsplit(".", 1)[0] if "." in str(path) else str(path)
+    first2 = Path(stem + ".001")
+    if first2.exists():
+        chunks = sorted(Path(stem).parent.glob(Path(stem).name + ".*"))
+        if chunks:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".vsqz")
+            with open(tmp.name, "wb") as out:
+                for c in sorted(chunks):
+                    out.write(c.read_bytes())
+            return Path(tmp.name)
+
+    return path
+
+
 def _restore_tensors(tensors_np, header, out_dir, verbose=False):
     """Write tensors to output directory in original format. Shared: decompress + rediff."""
     orig_fmt = header.get("converted_from", "pytorch")
@@ -787,8 +826,10 @@ def _restore_raw_files(out_dir, base_header, raw_deltas=None, verbose=False):
                 if len(raw_deltas[rel]) > 2:
                     try: rp.chmod(raw_deltas[rel][2])
                     except OSError: pass
-                if len(raw_deltas[rel]) > 3:
-                    try: os.utime(rp, (raw_deltas[rel][4], raw_deltas[rel][3]) if len(raw_deltas[rel]) > 4 else (raw_deltas[rel][3], raw_deltas[rel][3]), follow_symlinks=False)
+                if len(raw_deltas[rel]) > 3 and raw_deltas[rel][3] is not None:
+                    mtime = raw_deltas[rel][3]
+                    atime = raw_deltas[rel][4] if len(raw_deltas[rel]) > 4 and raw_deltas[rel][4] is not None else mtime
+                    try: os.utime(rp, (atime, mtime), follow_symlinks=False)
                     except OSError: pass
             else:
                 rp.write_bytes(dctx.decompress(data))
@@ -823,8 +864,10 @@ def _restore_raw_files(out_dir, base_header, raw_deltas=None, verbose=False):
         if len(entry) > 2:
             try: rp.chmod(entry[2])
             except OSError: pass
-        if len(entry) > 3:
-            try: os.utime(rp, (entry[4], entry[3]) if len(entry) > 4 else (entry[3], entry[3]), follow_symlinks=False)
+        if len(entry) > 3 and entry[3] is not None:
+            mtime = entry[3]
+            atime = entry[4] if len(entry) > 4 and entry[4] is not None else mtime
+            try: os.utime(rp, (atime, mtime), follow_symlinks=False)
             except OSError: pass
         raw_written += 1
 
@@ -884,55 +927,31 @@ Examples:
 
 
 def main():
-    if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
+    from .argparse_vsqz import parse_args
+    parsed = parse_args()
+    if parsed.help:
         print(_usage())
         return
 
-    # Parse gzip/zip-style flags
-    keep = ("-k" in sys.argv or "--keep" in sys.argv)
-    decompress = ("-d" in sys.argv or "--decompress" in sys.argv)
-    quiet = ("-q" in sys.argv or "--quiet" in sys.argv)
-    force = ("-f" in sys.argv or "--force" in sys.argv)
-    do_zstd = ("-z" in sys.argv or "--zstd" in sys.argv)
-    do_test = ("-t" in sys.argv or "--test" in sys.argv)
-    do_list = ("-l" in sys.argv or "--list" in sys.argv)
-    do_diff = ("--diff" in sys.argv)
-    do_serve = ("--serve" in sys.argv)
-    do_rediff = ("--rediff" in sys.argv)
-    recursive = ("-r" in sys.argv or "--recursive" in sys.argv)
-    split_val = None
-    for i, a in enumerate(sys.argv):
-        if a in ("-s", "--split") and i + 1 < len(sys.argv):
-            split_val = sys.argv[i + 1]
-    exclude_pats = []
-    for i, a in enumerate(sys.argv):
-        if a in ("-x", "--exclude") and i + 1 < len(sys.argv):
-            exclude_pats.append(sys.argv[i + 1])
-
-    verbose = not quiet
-
-    # Compression level: -1 .. -9
-    comp_level = 6
-    for i in range(1, 10):
-        if f"-{i}" in sys.argv:
-            comp_level = i
-    quantize = "int8" if comp_level >= 8 else "fp16"
-
-    # Positional args (skip flags and their values)
-    args = []
-    skip_next = False
-    for a in sys.argv[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-        if a.startswith("-") and a not in ("-1","-2","-3","-4","-5","-6","-7","-8","-9"):
-            if a in ("-s","--split","-x","--exclude"):
-                skip_next = True
-            continue
-        args.append(a)
-
-    source = args[0] if len(args) > 0 else None
-    output = args[1] if len(args) > 1 else None
+    keep = parsed.keep
+    decompress = parsed.decompress
+    quiet = parsed.quiet
+    force = parsed.force
+    do_zstd = parsed.zstd
+    do_test = parsed.test
+    do_list = parsed.list
+    do_diff = parsed.diff
+    do_serve = parsed.serve
+    do_rediff = parsed.rediff
+    recursive = parsed.recursive
+    split_val = parsed.split
+    exclude_pats = parsed.exclude
+    verbose = parsed.verbose
+    comp_level = parsed.comp_level
+    quantize = parsed.quantize
+    source = parsed.source
+    output = parsed.args[1] if len(parsed.args) >= 2 else None  # second positional
+    extra_output = parsed.output  # -o/--output flag value
 
     # ── Modes ──
 
@@ -1034,14 +1053,7 @@ def main():
     # ── Diff ────────────────────────────────────────────────────────
     if do_diff and source and output:
         variant = output  # first positional is variant, second is current "output"
-        delta_out = None
-        for i, a in enumerate(sys.argv):
-            if a in ("-o", "--output") and i + 1 < len(sys.argv):
-                val = sys.argv[i + 1]
-                if not val.startswith("-"):
-                    delta_out = val
-        if not delta_out:
-            delta_out = variant + ".delta.vsqz"
+        delta_out = extra_output if extra_output else (variant + ".delta.vsqz")
         if verbose: print(f"Computing delta: {source} vs {variant}")
 
         # Require .vsqz base for reproducible SHA-256
@@ -1049,8 +1061,14 @@ def main():
             print("  Error: base must be a .vsqz file. Compress first: vsqz base.gguf base.vsqz")
             sys.exit(1)
 
+        # Auto-rejoin split archives
+        source_path = _auto_rejoin_split(Path(source))
+        variant_path = Path(variant) if variant.endswith('.vsqz') else Path(variant)
+        if variant.endswith('.vsqz'):
+            variant_path = _auto_rejoin_split(variant_path)
+
         from .vsqz_format import _read_vsqz
-        bh, bt = _read_vsqz(source, verify_sha256=True)
+        bh, bt = _read_vsqz(str(source_path), verify_sha256=True)
         base_tensors = {}
         for n in sorted(bh["tensors"]):
             e = bh["tensors"][n]
@@ -1068,7 +1086,7 @@ def main():
         # Load variant — may be .vsqz or raw format
         if variant.endswith('.vsqz'):
             from .vsqz_format import _read_vsqz as _rv3
-            vh, vt = _rv3(variant, verify_sha256=True)
+            vh, vt = _rv3(str(variant_path), verify_sha256=True)
             var_tensors = {}
             for n in sorted(vh["tensors"]):
                 e = vh["tensors"][n]
@@ -1091,41 +1109,63 @@ def main():
         total = len(base_tensors)
         pct = shared / max(total, 1) * 100
 
-        # Compare raw (non-tensor) files from both base and variant
+        # Compare raw files from base and variant (.vsqz or directory)
         base_raws = bh.get("source_metadata", {}).get("raw_files", {})
         var_raws = var_meta.get("raw_files", {}) if "raw_files" in var_meta else {}
-        raw_deltas = {}  # {rel_path: (new_bytes, mode) or None to delete}
+        raw_deltas = {}
         all_raw = set(base_raws) | set(var_raws)
         base_raw_blobs = bh.get("_raw_blobs", {})
+        var_is_dir = Path(variant).is_dir() if not variant.endswith('.vsqz') else False
+
+        # Read variant raw blobs (from .vsqz or filesystem)
+        import zstandard as _zstd5
+        var_raw_blobs = {}
+        if variant.endswith('.vsqz'):
+            # Use full _read_vsqz to get _raw_blobs
+            from .vsqz_format import _read_vsqz as _rv5
+            vh_raw, _ = _rv5(variant)
+            var_raw_blobs = vh_raw.get("_raw_blobs", {})
+            # Decompress for comparison
+            dctx_r = _zstd5.ZstdDecompressor()
+            for rp, entry in var_raw_blobs.items():
+                # entry is (compressed_data, mode)
+                var_raw_blobs[rp] = (dctx_r.decompress(entry[0]), entry[1])
+
         for rp in sorted(all_raw):
             if rp in var_raws and rp not in base_raws:
-                # New file in variant — read content from disk
-                var_src = Path(variant)
-                var_fp = var_src / rp if var_src.is_dir() else var_src
-                if not var_fp.is_dir() and var_fp.exists():
-                    content = var_fp.read_bytes()
-                    raw_deltas[rp] = ("new", content)
+                # New file in variant
+                if var_is_dir:
+                    fp = Path(variant) / rp
+                    st = fp.lstat()
+                    raw_deltas[rp] = ("new", fp.read_bytes(), st.st_mode & 0o777,
+                                      st.st_mtime, st.st_atime)
+                elif rp in var_raw_blobs:
+                    raw_deltas[rp] = ("new", var_raw_blobs[rp][0], var_raw_blobs[rp][1])
                 else:
                     raw_deltas[rp] = ("new", None)
             elif rp in base_raws and rp not in var_raws:
-                # File removed in variant
                 raw_deltas[rp] = ("removed", None)
             elif rp in base_raws and rp in var_raws:
-                # Compare — variant on disk, base in .vsqz
+                # Compare: base bytes vs variant bytes
+                base_bytes = None
                 if base_raw_blobs and rp in base_raw_blobs:
-                    import zstandard as _zstd5
                     base_bytes = _zstd5.ZstdDecompressor().decompress(base_raw_blobs[rp][0])
-                else:
-                    base_bytes = None
-                # Read variant raw from disk
-                var_src = Path(variant)
-                if var_src.is_dir():
-                    var_fp = var_src / rp
-                    if var_fp.exists():
-                        var_bytes = var_fp.read_bytes()
-                        var_mode = var_fp.stat().st_mode & 0o777
-                        if base_bytes is None or base_bytes != var_bytes:
-                            raw_deltas[rp] = ("changed", var_bytes, var_mode)
+                var_bytes = None
+                if var_is_dir and (Path(variant) / rp).exists():
+                    fp = Path(variant) / rp
+                    st = fp.lstat()
+                    var_bytes = fp.read_bytes()
+                    var_mode = st.st_mode & 0o777
+                    if base_bytes is None or base_bytes != var_bytes:
+                        raw_deltas[rp] = ("changed", var_bytes, var_mode,
+                                          st.st_mtime, st.st_atime)
+                elif rp in var_raw_blobs:
+                    var_bytes = var_raw_blobs[rp][0]
+                    var_mode = var_raw_blobs[rp][1]
+                    if base_bytes is None or base_bytes != var_bytes:
+                        raw_deltas[rp] = ("changed", var_bytes, var_mode)
+                        # No mtime available from .vsqz source
+
         if raw_deltas:
             import zstandard as _zstd2, base64 as _b64
             cctx = _zstd2.ZstdCompressor(level=3)
@@ -1134,7 +1174,9 @@ def main():
                 if entry[0] in ("changed", "new") and len(entry) > 1 and entry[1] is not None:
                     compressed = cctx.compress(entry[1])
                     raw_deltas_compressed[rp] = (entry[0], _b64.b64encode(compressed).decode(),
-                                                 entry[2] if len(entry) > 2 else 0o644)
+                                                 entry[2] if len(entry) > 2 else 0o644,
+                                                 entry[3] if len(entry) > 3 else None,
+                                                 entry[4] if len(entry) > 4 else None)
                 else:
                     raw_deltas_compressed[rp] = entry
             raw_deltas = raw_deltas_compressed
@@ -1200,7 +1242,7 @@ def main():
     # ── Serve ───────────────────────────────────────────────────────
     if do_serve and source:
         print(f"Serving multi-model: {source}")
-        deltas = [a for a in args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
+        deltas = [a for a in parsed.args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
         if not deltas:
             print("Usage: vsqz --serve base_model delta1.vsqz [delta2.vsqz ...]")
             sys.exit(1)
@@ -1257,12 +1299,7 @@ def main():
     if do_rediff and source and output:
         # Syntax: vsqz --rediff base.vsqz delta.vsqz -o reconstructed.gguf
         delta_in = output  # second positional arg is delta
-        delta_out = None
-        for i, a in enumerate(sys.argv):
-            if a in ("-o", "--output") and i + 1 < len(sys.argv):
-                val = sys.argv[i + 1]
-                if not val.startswith("-"):
-                    delta_out = val
+        delta_out = extra_output
         if not delta_out:
             print("Usage: vsqz --rediff base.vsqz delta.vsqz -o reconstructed.safetensors")
             sys.exit(1)
@@ -1270,10 +1307,11 @@ def main():
         if verbose:
             print(f"Reconstructing: {source} + {delta_in} → {delta_out}")
 
-        # Load base (.vsqz or raw format)
+        # Load base (.vsqz or raw format) — auto-rejoin split archives
         if source.endswith('.vsqz'):
+            source_path = _auto_rejoin_split(Path(source))
             from .vsqz_format import _read_vsqz
-            bh, bt = _read_vsqz(source, verify_sha256=True)
+            bh, bt = _read_vsqz(str(source_path), verify_sha256=True)
             base_tensors = {}
             for n in sorted(bh["tensors"]):
                 e = bh["tensors"][n]
