@@ -23,8 +23,15 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > Full multi-model inference in v0.5. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
 >
 > For model distribution: one base model + tiny deltas instead of dozens of full downloads.
-> `--rediff` reconstructs any fine-tune from base + delta. 50 models at ~1 GB each
-> instead of 18 GB — a clean base catalog with lightweight variants.
+> `--rediff` reconstructs any fine-tune from base + delta.
+>
+> | Strategy | 10 Bases | 50 Fine-Tunes | Total | |
+> |---|---|---|---|---|
+> | Full downloads | 10 × 18 GB | 50 × 18 GB | **1,080 GB** | |
+> | Catalog + deltas | 10 × 8 GB | 50 × 1 GB | **130 GB** | **88% less** |
+>
+> Bases compressed (fp16), deltas contain only changed weights. `--rediff` reconstructs
+> any variant locally. One catalog, no duplicates.
 >
 > ```
 > vsqz --diff   qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz      # only changed weights
