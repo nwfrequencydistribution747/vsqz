@@ -128,7 +128,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 
 | Technique | Origin | What It Saves | VRAM Freed |
 |-----------|--------|---------------|------------|
-| **GaLore** | ICML 2024 | Optimizer states (SVD projection r=128) | ~2 GB |
+| **GaLore-inspired** | Weight decomposition | AdamW on factorized weights | ~2 GB |
 | **LISA** | 2024 | Activations (50% layer sampling) | ~4 GB |
 | **FP16 States** | Native | Optimizer precision (32→16 bit) | ~1.5 GB |
 | **INT8 States** | 8-bit Adam | Optimizer precision (32→8 bit) | ~3 GB |
