@@ -15,18 +15,23 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 `pip install vsqz` — the `gzip` for AI models. 55% smaller files. Full archiver: directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch. VRAM training optimizers (GaLore, Q-GaLore, LISA) for 9B→12GB QLoRA.
 
-**Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats.
+**Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats (llama.cpp, etc.).
 
-> 🔥 **Coming in v0.4.0 ([dev branch](https://github.com/butterwecksolutions/vsqz/tree/dev)):** Multi-model delta sharing.
-> Run 5 fine-tunes of the same base model at once — load the base weights **once** (8 GB),
-> apply deltas (+1 GB each). 5 models in **13 GB VRAM** instead of 90 GB.
-> 🧪 Preview: --serve loads shared tensors for VRAM measurement.
-> Full multi-model inference coming in soon.
-> `vsqz --diff base.vsqz fine.gguf -o delta.vsqz` + `vsqz --serve base.vsqz delta1.vsqz delta2.vsqz ...`
-> Works across safetensors, GGUF, and PyTorch. Same-architecture guaranteed, cross-architecture
-> gets accidental wins (shared embeddings, normalization). [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
+> 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
+> 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
+> VRAM of 1. Self-describing, SHA-verified, format-agnostic.
+> `--diff` is production-ready. `--serve` shares tensors + measures VRAM (full inference in v0.4.1).
+>
+> ```
+> vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
+> vsqz --serve qwen-base.vsqz qwopus-delta.vsqz huihui-delta.vsqz  # base once, rest on top
+> ```
+>
+> `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
+> Wrong base → rejected. Same base from any source (GGUF/safetensors/PT) → accepted.
 
-> **v0.3.4 — production-tested.** Full archiver (tar-level fidelity): 8 training + 3 archival techniques,
+> **v0.3.5 — stable.** Full archiver (tar-level fidelity): compress, decompress, list, verify. Roundtrip-safe
+> for safetensors, GGUF, PyTorch. Training optimizers (GaLore, LISA, Q-GaLore) in beta. Inference features on roadmap.
 > directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
 > `vsqz -l` lists archive contents. 41 tests, autonomous CI.
 
@@ -36,6 +41,10 @@ python -m vsqz convert model/ output.vsqz
 
 # List archive contents (files, sizes, permissions, timestamps)
 python -m vsqz -l model.vsqz
+
+# 🔥 Multi-model: delta sharing (v0.4.0)
+vsqz --diff  qwen.vsqz qwopus.gguf -o qwopus-delta.vsqz   # store only changed weights
+vsqz --serve qwen.vsqz qwopus-delta.vsqz ablit-delta.vsqz # 3 models, base once
 
 # Training: wrap your optimizer, save VRAM  
 from vsqz import VRAMSqueeze
@@ -105,7 +114,7 @@ same files, same directory structure, same permissions.
 | safetensors (9B) | 18 GB | 8 GB | 7 GB | **61%** |
 | GGUF F16 (9B) | 18 GB | 8 GB | 7 GB | **61%** |
 | PyTorch Checkpoint (w/ AdamW) | 56 GB | 18 GB | 16 GB | **71%** |
-| PyTorch weights only | 18 GB | 8 GB | 7 GB | **61%** |
+| PyTorch Checkpoint (weights only) | 18 GB | 8 GB | 7 GB | **61%** |
 | **ALL THREE → single .vsqz.zst** | **56 GB** | **8 GB** | **7 GB** | **87%** |
 
 ---
@@ -118,7 +127,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 
 | Technique | Origin | What It Saves | VRAM Freed |
 |-----------|--------|---------------|------------|
-| **GaLore-inspired** | Low-rank weight decomposition | AdamW on factorized weights | ~2 GB |
+| **GaLore-inspired** | Weight decomposition | AdamW on factorized weights | ~2 GB |
 | **LISA** | 2024 | Activations (50% layer sampling) | ~4 GB |
 | **FP16 States** | Native | Optimizer precision (32→16 bit) | ~1.5 GB |
 | **INT8 States** | 8-bit Adam | Optimizer precision (32→8 bit) | ~3 GB |
@@ -133,7 +142,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 |---------|--------|-------------|---------|
 | **FP16 Compression** | IEEE 754 | FP32→FP16 weight storage | 50% |
 | **zstd Post-Compress** | Facebook | 5-15% extra on top of FP16 | 5-15% |
-| **AdamW Stripping** | vsqz | Drop momentum+variance (2× model size) | ~66% of ckpt |
+| **AdamW Stripping** | vsqz | Drop Momentum+Variance states | ~66% of checkpoint |
 | **SHA-256** | NIST | Cryptographic integrity | – |
 | **Recovery Record** | RAR | Self-repairing header | – |
 | **KV-Cache H.264** | StreamingLLM | I/P/B-frame token eviction | 2× context |
@@ -203,9 +212,36 @@ vsqz -t model.vsqz && rm model.safetensors
 # Recursively compress all models, keep originals, show stats
 vsqz -krv ~/models/
 
+# 🔥 Delta sharing: run 5 fine-tunes in the VRAM of 1
+vsqz qwen-base.gguf qwen.vsqz                          # compress base (once)
+vsqz --diff qwen.vsqz qwopus.gguf -o qwopus.vsqz       # build delta (only diffs)
+vsqz --diff qwen.vsqz huihui.gguf -o huihui.vsqz       # another fine-tune
+vsqz -l qwopus.vsqz                                     # peek: which base? how shared?
+vsqz --serve qwen.vsqz qwopus.vsqz huihui.vsqz         # all 3, base loaded once
+
+# Find shared chunk across unrelated models (accidental wins)
+vsqz --diff mistral.vsqz llama.vsqz -o cross.vsqz      # any shared embeddings?
+
 # Decompress zstd archive, verbose
 vsqz -dv model.vsqz.zst
 ```
+
+### How `--diff` / `--serve` work (v0.4.0-dev)
+
+`--diff` is **production-ready**: loads two models, compares tensors, stores only
+the differing weights. SHA-verified, self-describing, cross-format.
+
+`--serve` is **preview**: loads shared tensors into Python dicts and measures VRAM.
+For actual multi-model inference, each model needs to be wrapped in a PyTorch
+state-dict with `model.load_state_dict()`. Full HuggingFace integration (`AutoModel`)
+is planned for v0.4.1.
+
+```
+Current:  --serve → shared dicts → measure VRAM (preview)
+v0.4.1:   --serve → AutoModel.load_state_dict → model.generate() (inference)
+```
+
+---
 
 ### Verify Compression (before deleting originals)
 
@@ -224,9 +260,9 @@ print(f'Verdict: Safe to delete original')
 
 ```python
 from transformers import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # 🧪 Preview
+model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Just works
 ```
-HF plugin included — manual setup needed. Full integration in v0.4.1.
+Import vsqz — AutoModel now accepts `.vsqz` files natively. No manual setup.
 
 ### Training (HuggingFace / Axolotl)
 
@@ -288,7 +324,7 @@ Stacks FP16 + zstd + AdamW stripping. Optimal for long-term storage, cloud uploa
 | Step | What happens | Size reduction |
 |------|-------------|---------------|
 | 1. FP32→FP16 | Half-precision weights | 2× |
-| 2. AdamW Strip | Remove momentum+variance (2× model) | ~66% of ckpt |
+| 2. AdamW Strip | Remove momentum+variance (2× model size) | ~66% of ckpt |
 | 3. zstd | Post-compression | 5-15% extra |
 | **Combined** | **Archive grade** | **87% vs all three formats** |
 

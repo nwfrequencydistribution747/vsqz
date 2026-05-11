@@ -323,10 +323,16 @@ def _load_pytorch(path: Path) -> Tuple[Dict, Dict]:
                     if hasattr(subval, "numpy"):
                         tensors[f"{key}.{subkey}"] = subval.cpu().numpy()
                         tensor_names.append(f"{key}.{subkey}")
+                    elif isinstance(subval, np.ndarray):
+                        tensors[f"{key}.{subkey}"] = subval
+                        tensor_names.append(f"{key}.{subkey}")
                     elif isinstance(subval, (int, float, str)):
                         metadata[f"{key}.{subkey}"] = subval
             elif hasattr(value, "numpy"):
                 tensors[key] = value.cpu().numpy()
+                tensor_names.append(key)
+            elif isinstance(value, np.ndarray):
+                tensors[key] = value
                 tensor_names.append(key)
             else:
                 metadata[key] = value
@@ -619,6 +625,27 @@ def _save_gguf(path: Path, tensors: Dict, metadata: Dict, verbose: bool = False)
     return path
 
 
+def _compute_delta(base_tensors, variant_tensors, tolerance=0):
+    """Return tensors that differ between base and variant.
+
+    Returns:
+        (shared_count, delta_tensors) — delta_tensors contains only differing entries.
+    """
+    shared = 0
+    deltas = {}
+    for name in sorted(variant_tensors):
+        v = variant_tensors[name]
+        if name in base_tensors:
+            b = base_tensors[name]
+            if b.shape == v.shape and b.dtype == v.dtype:
+                if np.array_equal(b, v):
+                    shared += 1
+                    continue
+        # Tensor differs or doesn't exist in base — include in delta
+        deltas[name] = v.copy()
+    return shared, deltas
+
+
 def _apply_zstd(path: str, keep_original: bool = False) -> str:
     """Post-compress .vsqz with zstd. Returns new path (.vsqz.zst)."""
     import zstandard as zstd
@@ -739,6 +766,9 @@ Options:
   -s, --split SIZE   Split output into chunks (e.g. -s 8G for cloud upload)
   -x, --exclude KEY  Exclude tensors matching pattern (e.g. -x adam -x opt)
   -z, --zstd         Post-compress with zstd (archive mode, 5-15% smaller)
+  --diff             Compute delta between base and variant (only differing weights)
+  --serve            Multi-model: load base once, apply deltas on top
+  -o, --output OUT   Output file (for --diff)
   -h, --help         Show this help
 
 Examples:
@@ -750,7 +780,9 @@ Examples:
   vsqz -9 -v model.gguf                # best compression, verbose
   vsqz -s 8G large-20B.safetensors     # split into 8 GB chunks
   vsqz -x adam checkpoint.pt           # strip optimizer states
-  vsqz -r models/                      # compress all models in directory"""
+  vsqz -r models/                      # compress all models in directory
+  vsqz --diff base.vsqz fine.gguf -o delta.vsqz   # compute delta (shared weights)
+  vsqz --serve base.vsqz delta1.vsqz delta2.vsqz  # multi-model: shared base + deltas"""
 
 
 def main():
@@ -766,6 +798,8 @@ def main():
     do_zstd = ("-z" in sys.argv or "--zstd" in sys.argv)
     do_test = ("-t" in sys.argv or "--test" in sys.argv)
     do_list = ("-l" in sys.argv or "--list" in sys.argv)
+    do_diff = ("--diff" in sys.argv)
+    do_serve = ("--serve" in sys.argv)
     recursive = ("-r" in sys.argv or "--recursive" in sys.argv)
     split_val = None
     for i, a in enumerate(sys.argv):
@@ -884,6 +918,173 @@ def main():
         print(f"\n  Format: {h.get('converted_from', '?')}  |  Quantize: {h.get('quantize', '?')}  |  {len(ts)} tensors ({total_params/1e6:.1f}M params)")
         sha = h.get("sha256", "")
         if sha: print(f"  SHA-256: {sha[:32]}...")
+
+        # Delta self-description
+        if h.get("delta"):
+            bi = h.get("base_model", {})
+            print(f"\n  🧬 Delta file — requires base model:")
+            print(f"    Architecture:  {bi.get('architecture', '?')}")
+            print(f"    Parameters:    {bi.get('total_params', 0)/1e9:.1f}B")
+            print(f"    Layers:        {bi.get('layer_count', '?'):>4}  |  Tensors: {bi.get('tensor_count', '?'):>4}  |  Hidden: {bi.get('hidden_dim', '?') or '?'}")
+            print(f"    Vocab:         {bi.get('vocab_size', '?'):>6}  |  Source: {bi.get('source_name', '?')}")
+            print(f"    Base built:    {bi.get('source_mtime', '?')}  |  Delta created: {bi.get('delta_created', '?')}")
+            print(f"    Base SHA-256:  {h.get('base_sha256', '?')[:32]}...")
+            print(f"    Shared tensors: {h.get('shared_count', '?')}/{bi.get('tensor_count', '?')}")
+        return
+
+    # ── Diff ────────────────────────────────────────────────────────
+    if do_diff and source and output:
+        variant = output  # first positional is variant, second is current "output"
+        delta_out = None
+        for i, a in enumerate(sys.argv):
+            if a in ("-o", "--output") and i + 1 < len(sys.argv):
+                delta_out = sys.argv[i + 1]
+        if not delta_out:
+            delta_out = variant + ".delta.vsqz"
+        if verbose: print(f"Computing delta: {source} vs {variant}")
+
+        # Require .vsqz base for reproducible SHA-256
+        if not source.endswith('.vsqz'):
+            print("  Error: base must be a .vsqz file. Compress first: vsqz base.gguf base.vsqz")
+            sys.exit(1)
+
+        from .vsqz_format import _read_vsqz
+        bh, bt = _read_vsqz(source, verify_sha256=True)
+        base_tensors = {}
+        for n in sorted(bh["tensors"]):
+            e = bh["tensors"][n]
+            d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
+            base_tensors[n] = np.frombuffer(bt[n], dtype=d).reshape(e.get("shape",[]))
+        import hashlib as _hl2
+        base_sha = _hl2.sha256(
+            b"".join(
+                n.encode() + base_tensors[n].astype(np.float16).tobytes()
+                for n in sorted(base_tensors)
+            )
+        ).hexdigest()
+        base_meta = {"format": bh.get("converted_from","safetensors")}
+
+        var_tensors, var_meta = _load_source(Path(variant))
+
+        # Cast variant to base dtype for fair comparison
+        var_normalized = {}
+        for n, v in var_tensors.items():
+            if n in base_tensors and v.shape == base_tensors[n].shape:
+                var_normalized[n] = v.astype(base_tensors[n].dtype)
+            else:
+                var_normalized[n] = v
+
+        shared, deltas = _compute_delta(base_tensors, var_normalized)
+        total = len(base_tensors)
+        pct = shared / max(total, 1) * 100
+        if verbose:
+            print(f"  Base: {len(base_tensors)} tensors ({_fmt_bytes(sum(t.nbytes for t in base_tensors.values()))})")
+            print(f"  Variant: {len(var_tensors)} tensors ({_fmt_bytes(sum(t.nbytes for t in var_tensors.values()))})")
+            print(f"  Shared: {shared}/{total} tensors ({pct:.1f}%)")
+            print(f"  Delta: {len(deltas)} tensors ({_fmt_bytes(sum(t.nbytes for t in deltas.values()))})")
+
+        if not deltas:
+            print("  ✅ Models are identical — no delta needed.")
+            return
+
+        # Build comprehensive base metadata for self-documenting deltas
+        total_params = sum(int(np.prod(t.shape)) for t in base_tensors.values())
+        embed_key = next((n for n in base_tensors if 'embed' in n.lower()), None)
+        vocab_size = int(base_tensors[embed_key].shape[0]) if embed_key else None
+        hidden_dim = int(base_tensors[embed_key].shape[1]) if embed_key and len(base_tensors[embed_key].shape) > 1 else None
+        layer_count = len([n for n in base_tensors if 'layers.' in n])  # approximate
+        # Collect GGUF-style metadata if available
+        kv_pairs = bh.get("source_metadata", {}).get("kv_pairs", {})
+        arch = kv_pairs.get("general.architecture", {})
+        arch_name = arch.get("value") if isinstance(arch, dict) else bh.get("model_config", {}).get("arch", "unknown")
+
+        base_info = {
+            "sha256": base_sha,
+            "tensor_count": len(base_tensors),
+            "total_params": total_params,
+            "hidden_dim": hidden_dim,
+            "vocab_size": vocab_size,
+            "layer_count": layer_count,
+            "architecture": str(arch_name) if arch_name else "unknown",
+            "source_format": bh.get("converted_from", "safetensors"),
+            "source_name": Path(source).name,
+            "source_mtime": datetime.datetime.fromtimestamp(
+                Path(source).stat().st_mtime
+            ).isoformat(),
+            "delta_created": datetime.datetime.now().isoformat(),
+        }
+        if kv_pairs:
+            base_info["gguf_metadata"] = kv_pairs
+
+        # Write delta .vsqz — uses the verified base SHA from the .vsqz header
+        delta_meta = {
+            "format": base_meta.get("format", "safetensors"),
+            "source_files": {"delta": ["delta"]},
+        }
+        delta_header = _build_vsqz_header(deltas, delta_meta, "fp16")
+        delta_header["delta"] = True
+        delta_header["base_sha256"] = base_sha
+        delta_header["base_model"] = base_info
+        delta_header["shared_count"] = shared
+        _write_vsqz(Path(delta_out), delta_header, deltas)
+        if verbose:
+            print(f"  Delta written: {delta_out} ({_fmt_bytes(Path(delta_out).stat().st_size)})")
+        return
+
+    # ── Serve ───────────────────────────────────────────────────────
+    if do_serve and source:
+        print(f"Serving multi-model: {source}")
+        deltas = [a for a in args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
+        if not deltas:
+            print("Usage: vsqz --serve base_model delta1.vsqz [delta2.vsqz ...]")
+            sys.exit(1)
+
+        # Load base
+        base_tensors, base_meta = _load_source(Path(source))
+        base_size = sum(t.nbytes for t in base_tensors.values())
+        print(f"  Base: {len(base_tensors)} tensors ({_fmt_bytes(base_size)})")
+
+        # Compute base SHA (fp16-normalized for cross-format consistency)
+        import hashlib as _hl
+        base_sha = _hl.sha256(
+            b"".join(
+                n.encode() + base_tensors[n].astype(np.float16).tobytes()
+                for n in sorted(base_tensors)
+            )
+        ).hexdigest()
+
+        # Apply each delta (verify base SHA match)
+        loaded = 1
+        for delta_path in deltas:
+            from .vsqz_format import _read_vsqz
+            dh, dd = _read_vsqz(delta_path)
+            if not dh.get("delta"):
+                print(f"  ⚠️  {delta_path} is not a delta file — skipping")
+                continue
+            expected_sha = dh.get("base_sha256", "")
+            if expected_sha and expected_sha != base_sha:
+                bi = dh.get("base_model", {})
+                arch = bi.get("architecture", "unknown")
+                params = bi.get("total_params", 0)/1e9
+                print(f"  ⚠️  {Path(delta_path).name}: BASE MISMATCH")
+                print(f"      Expected: {arch} ({params:.1f}B) — SHA {expected_sha[:16]}...")
+                print(f"      Loaded:   {_fmt_bytes(base_size)} base — SHA {base_sha[:16]}...")
+                print(f"      Skipping this delta.")
+                continue
+            for name in sorted(dd):
+                if name in base_tensors:
+                    arr = np.frombuffer(dd[name],
+                        dtype=np.float16 if dh["tensors"][name]["dtype"] == "float16" else np.float32
+                    ).reshape(dh["tensors"][name]["shape"])
+                    base_tensors[name] = arr
+            loaded += 1
+            print(f"  + {Path(delta_path).name} ({len(dd)} deltas)")
+
+        total_size = sum(t.nbytes for t in base_tensors.values())
+        saved = _fmt_bytes(base_size * loaded - total_size)
+        print(f"  {loaded} models loaded: base {_fmt_bytes(base_size)} + {loaded-1} delta(s)")
+        print(f"  Total VRAM: {_fmt_bytes(total_size)} (saved {saved} vs loading separately)")
+        print("  ✅ Multi-model ready (base shared, deltas applied)")
         return
 
     # Handle .vsqz.zst transparently (decompress first)
