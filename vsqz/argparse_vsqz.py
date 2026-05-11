@@ -16,6 +16,7 @@ def parse_args():
     p.add_argument("--serve", action="store_true")
     p.add_argument("--rediff", action="store_true")
     p.add_argument("--mmproj", action="store_true")
+    p.add_argument("--status", action="store_true", help="Show VRAM comparison stats with --serve")
 
     # Behavior
     p.add_argument("-k", "--keep", action="store_true")
