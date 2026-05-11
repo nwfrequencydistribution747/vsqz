@@ -737,6 +737,102 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+def _restore_tensors(tensors_np, header, out_dir, verbose=False):
+    """Write tensors to output directory in original format. Shared: decompress + rediff."""
+    orig_fmt = header.get("converted_from", "pytorch")
+    src_files = header.get("source_metadata", {}).get("source_files", {})
+    if orig_fmt == "safetensors" and src_files:
+        from safetensors.torch import save_file
+        for fname, tnames in sorted(src_files.items()):
+            if not tnames: continue
+            out_path = out_dir / fname
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            save_file({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np}, str(out_path))
+            if verbose: print(f"  → {out_path}")
+    elif orig_fmt == "gguf":
+        _save_gguf(out_dir / "model.gguf", tensors_np,
+                   header.get("source_metadata", {}), verbose=verbose)
+    else:
+        if src_files:
+            for fname, tnames in sorted(src_files.items()):
+                if not tnames: continue
+                out_path = out_dir / fname
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np}, str(out_path))
+                if verbose: print(f"  → {out_path}")
+        else:
+            out_path = out_dir / "pytorch_model.bin"
+            torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tensors_np}, str(out_path))
+            if verbose: print(f"  → {out_path}")
+
+
+def _restore_raw_files(out_dir, base_header, raw_deltas=None, verbose=False):
+    """Restore non-tensor files from base + deltas. Shared: decompress + rediff."""
+    import zstandard as _zstd, base64 as _b64
+    dctx = _zstd.ZstdDecompressor()
+    raw_deltas = raw_deltas or {}
+    raw_written = 0
+
+    if base_header.get("_raw_blobs"):
+        for rel, (data, mode) in base_header["_raw_blobs"].items():
+            if rel in raw_deltas and raw_deltas[rel][0] == "removed":
+                continue
+            rp = out_dir / rel
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            if rel in raw_deltas and raw_deltas[rel][0] in ("changed", "new"):
+                raw_data = raw_deltas[rel][1]
+                if isinstance(raw_data, str):
+                    raw_data = _b64.b64decode(raw_data)
+                rp.write_bytes(dctx.decompress(raw_data))
+                if len(raw_deltas[rel]) > 2:
+                    try: rp.chmod(raw_deltas[rel][2])
+                    except OSError: pass
+                if len(raw_deltas[rel]) > 3:
+                    try: os.utime(rp, (raw_deltas[rel][4], raw_deltas[rel][3]) if len(raw_deltas[rel]) > 4 else (raw_deltas[rel][3], raw_deltas[rel][3]), follow_symlinks=False)
+                    except OSError: pass
+            else:
+                rp.write_bytes(dctx.decompress(data))
+                if mode:
+                    try: rp.chmod(mode)
+                    except OSError: pass
+            raw_written += 1
+
+    # Symlinks from delta
+    for rel, entry in raw_deltas.items():
+        if entry[0] == "symlink":
+            rp = out_dir / rel
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            if rp.exists(follow_symlinks=False): rp.unlink()
+            rp.symlink_to(entry[1])
+            if len(entry) > 2:
+                try: os.utime(rp, (entry[2], entry[2]), follow_symlinks=False)
+                except OSError: pass
+            raw_written += 1
+
+    # New files from delta (not in base _raw_blobs)
+    for rel, entry in raw_deltas.items():
+        if entry[0] != "new" or rel in base_header.get("_raw_blobs", {}):
+            continue
+        rp = out_dir / rel
+        if rp.exists(): continue
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        if len(entry) > 1 and entry[1] is not None:
+            data = entry[1]
+            if isinstance(data, str): data = _b64.b64decode(data)
+            rp.write_bytes(dctx.decompress(data))
+        if len(entry) > 2:
+            try: rp.chmod(entry[2])
+            except OSError: pass
+        if len(entry) > 3:
+            try: os.utime(rp, (entry[4], entry[3]) if len(entry) > 4 else (entry[3], entry[3]), follow_symlinks=False)
+            except OSError: pass
+        raw_written += 1
+
+    if verbose and raw_written:
+        print(f"  + {raw_written} raw files restored")
+    return raw_written
+
+
 # ── CLI (gzip/zip compatible flags) ────────────────────────────────────
 
 
@@ -1221,95 +1317,36 @@ def main():
             if name in base_tensors and base_tensors[name].dtype != arr.dtype:
                 base_tensors[name] = base_tensors[name].astype(arr.dtype)
 
-        # Write reconstructed model (tensors + raw files from base)
+        # Write reconstructed tensors + raw files using shared functions
         out_path = Path(delta_out)
-        orig_fmt = base_meta.get("format", "safetensors")
-        out_suffix = out_path.suffix
-        # Detect directory: any path without a model file extension
         _MODEL_EXT = {".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt"}
         is_dir = (delta_out.endswith('/') or delta_out.endswith('\\')
-                 or out_suffix not in _MODEL_EXT)
+                 or out_path.suffix not in _MODEL_EXT)
+        out_dir = out_path if is_dir else out_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        if out_suffix == ".gguf":
-            _save_gguf(out_path, base_tensors, dh.get("base_model", {}), verbose=verbose)
-        elif out_suffix == ".safetensors" or is_dir:
-            from safetensors.torch import save_file
-            if is_dir:
-                out_path.mkdir(parents=True, exist_ok=True)
-                out_file = out_path / "model.safetensors"
-            else:
-                out_file = out_path
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-            save_file({n: torch.from_numpy(t.copy()) for n, t in base_tensors.items()}, str(out_file))
-            if verbose: print(f"  → {out_file}")
-        else:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({n: torch.from_numpy(t.copy()) for n, t in base_tensors.items()}, str(out_path))
-            if verbose: print(f"  → {out_path}")
-
-        # Also restore raw files: start from base, then apply delta changes
+        # Build minimal header for _restore_tensors
         from .vsqz_format import _read_vsqz as _rv2
         base_header, _ = _rv2(str(Path(source).resolve()))
-        raw_written = 0
+        restore_header = {
+            "converted_from": base_meta.get("format", "safetensors"),
+            "source_metadata": base_header.get("source_metadata", {}),
+        }
+        _restore_tensors(base_tensors, restore_header, out_dir, verbose=verbose)
+
+        # Restore raw files with delta changes applied
         raw_deltas = dh.get("raw_file_deltas", {})
+        _restore_raw_files(out_dir, base_header, raw_deltas, verbose=verbose)
 
-        out_dir = out_path if is_dir else out_path.parent
-        if is_dir:
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1. Restore base raw files
-        if base_header.get("_raw_blobs"):
-            import zstandard as _zstd3, base64 as _b64d
-            dctx = _zstd3.ZstdDecompressor()
-            for rel, (data, mode) in base_header["_raw_blobs"].items():
-                if rel in raw_deltas and raw_deltas[rel][0] == "removed":
-                    continue  # removed in delta
-                rp = out_dir / rel
-                rp.parent.mkdir(parents=True, exist_ok=True)
-                if rel in raw_deltas and raw_deltas[rel][0] == "changed":
-                    data = raw_deltas[rel][1]
-                    if isinstance(data, str):
-                        data = _b64d.b64decode(data)
-                    rp.write_bytes(dctx.decompress(data))
-                    if len(raw_deltas[rel]) > 2:
-                        try: rp.chmod(raw_deltas[rel][2])
-                        except OSError: pass
-                else:
-                    rp.write_bytes(dctx.decompress(data))
-                    if mode:
-                        try: rp.chmod(mode)
-                        except OSError: pass
-                raw_written += 1
-            # Add new files from delta
-            import zstandard as _zstd4, base64 as _b64d
-            dctx = _zstd4.ZstdDecompressor()
-            for rel, entry in raw_deltas.items():
-                if entry[0] == "new":
-                    rp = out_dir / rel
-                    rp.parent.mkdir(parents=True, exist_ok=True)
-                    if len(entry) > 1 and entry[1] is not None:
-                        data = _b64d.b64decode(entry[1]) if isinstance(entry[1], str) else entry[1]
-                        rp.write_bytes(dctx.decompress(data))
-                    if len(entry) > 2:
-                        try: rp.chmod(entry[2])
-                        except OSError: pass
-                    raw_written += 1
-            if verbose and raw_written:
-                print(f"  + {raw_written} raw files restored")
-
-        elif out_path.is_dir():
-            # Copy raw files from base directory
-            base_src = Path(source)
-            if base_src.is_dir():
-                for fp in base_src.rglob("*"):
-                    if fp.is_file() and fp.suffix != ".safetensors":
-                        rel = fp.relative_to(base_src)
-                        rp = out_path / rel
-                        rp.parent.mkdir(parents=True, exist_ok=True)
-                        import shutil
-                        shutil.copy2(fp, rp)
-                        raw_written += 1
-                if verbose: print(f"  + {raw_written} raw files from source")
+        # Restore symlinks from base (not affected by delta)
+        base_meta_src = base_header.get("source_metadata", {})
+        for rel_path, target in sorted(base_meta_src.get("symlinks", {}).items()):
+            rp = out_dir / rel_path
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            if rp.exists(follow_symlinks=False):
+                rp.unlink()
+            rp.symlink_to(target)
+            if verbose: print(f"  → {rp} -> {target}")
 
         out_size = sum(t.nbytes for t in base_tensors.values())
         if verbose:
@@ -1342,62 +1379,22 @@ def main():
             shape = entry.get("shape", [])
             tensors_np[name] = np.frombuffer(data, dtype=dtype).reshape(shape)
 
-        if orig_fmt == "safetensors" and src_files:
-            # Restore per-file structure from source_files mapping
-            from safetensors.torch import save_file
-            for fname, tnames in sorted(src_files.items()):
-                if not tnames:
-                    continue  # raw file, handled below
-                out_path = out_dir / fname
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                save_file({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np},
-                          str(out_path))
-                if verbose: print(f"  → {out_path}")
-        elif orig_fmt == "gguf":
-            gguf_path = out_dir / "model.gguf"
-            _save_gguf(gguf_path, tensors_np, src_meta, verbose=verbose)
-            if verbose: print(f"  → {gguf_path}")
-        else:
-            if src_files:
-                # Restore per-file structure for pytorch
-                for fname, tnames in sorted(src_files.items()):
-                    if not tnames:
-                        continue
-                    out_path = out_dir / fname
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tnames if n in tensors_np},
-                               str(out_path))
-                    if verbose: print(f"  → {out_path}")
-            else:
-                out_path = out_dir / "pytorch_model.bin"
-                torch.save({n: torch.from_numpy(tensors_np[n].copy()) for n in tensor_data},
-                           str(out_path))
-                if verbose: print(f"  → {out_path}")
+        # Restore tensors using shared function
+        _restore_tensors(tensors_np, header, out_dir, verbose=verbose)
 
-        # Restore symlinks
+        # Restore raw files + symlinks
+        _restore_raw_files(out_dir, header, verbose=verbose)
+
+        # Restore symlinks (separate from raw blobs)
         for rel_path, target in sorted(src_meta.get("symlinks", {}).items()):
             out_path = out_dir / rel_path
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_path.exists(follow_symlinks=False):
+                out_path.unlink()
             out_path.symlink_to(target)
             if verbose: print(f"  → {out_path} -> {target}")
 
-        # Restore raw (non-tensor) files
-        import zstandard as _zstd
-        dctx = _zstd.ZstdDecompressor()
-        for rel_path, (data, mode) in sorted(raw_blobs.items()):
-            out_path = out_dir / rel_path
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            decompressed = dctx.decompress(data)
-            out_path.write_bytes(decompressed)
-            if mode:
-                try:
-                    out_path.chmod(mode)
-                except (PermissionError, OSError) as e:
-                    if verbose:
-                        print(f"  ⚠️  Cannot chmod {out_path} to {mode:o}: {e}")
-            if verbose: print(f"  → {out_path}")
-
-        # Restore mtime/atime for all restored files (tensors + raw + symlinks)
+        # Restore mtime/atime for all restored files
         file_times = src_meta.get("file_times", {})
         for rel_path, (mtime, atime) in file_times.items():
             out_path = out_dir / rel_path
