@@ -13,9 +13,9 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/butterwecksolutions/vsqz/blob/main/LICENSE)
 [![Sponsor](https://img.shields.io/badge/sponsor-VSQZ%20unterst%C3%BCtzen-ff69b4)](https://github.com/sponsors/butterwecksolutions)
 
-`pip install vsqz` — the `gzip` for AI models. Train 13B on a 12GB card. Fine-tune 20B on 24GB. Double your context window. 55% smaller files = 55% faster downloads, 55% less disk. Works on RTX to H100 — avoid unnecessary GPU upgrades.
+`pip install vsqz` — the `gzip` for AI models. 55% smaller files. Full archiver: directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch. VRAM training optimizers (GaLore, Q-GaLore, LISA) for 9B→12GB QLoRA.
 
-**Unlike gzip/zip/7zip, no extraction needed.** Models load directly from `.vsqz` into VRAM — no temp files, no double disk I/O. `AutoModel.from_pretrained("model.vsqz")` just works.
+**Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats.
 
 > 🔥 **Coming in v0.4.0 ([dev branch](https://github.com/butterwecksolutions/vsqz/tree/dev)):** Multi-model delta sharing.
 > Run 5 fine-tunes of the same base model at once — load the base weights **once** (8 GB),
@@ -60,7 +60,7 @@ squeezer = VRAMSqueeze(model, optimizer=opt, preset="13B_24GB")
 | RTX 3090 | 24 GB | ✅ b=4 | ✅ b=4 | ✅ b=3 | ✅ b=1 |
 | RTX 4090 | 24 GB | ✅ b=4 | ✅ b=4 | ✅ b=4 | ✅ b=2 |
 
-*Without vsqz: 9B max, no 13B or 20B on any consumer GPU.*
+*Compare: QLoRA baseline vs vsqz-optimized VRAM on consumer GPUs.*
 
 ### Inference (Context Window Doubling via KV-Cache Compression)
 
@@ -104,7 +104,8 @@ same files, same directory structure, same permissions.
 |--------|----------|------|-------------|---------|
 | safetensors (9B) | 18 GB | 8 GB | 7 GB | **61%** |
 | GGUF F16 (9B) | 18 GB | 8 GB | 7 GB | **61%** |
-| PyTorch Checkpoint | 20 GB | 15 MB | 12 MB | **99.4%** |
+| PyTorch Checkpoint (w/ AdamW) | 56 GB | 18 GB | 16 GB | **71%** |
+| PyTorch weights only | 18 GB | 8 GB | 7 GB | **61%** |
 | **ALL THREE → single .vsqz.zst** | **56 GB** | **8 GB** | **7 GB** | **87%** |
 
 ---
@@ -117,7 +118,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 
 | Technique | Origin | What It Saves | VRAM Freed |
 |-----------|--------|---------------|------------|
-| **GaLore** | ICML 2024 | Optimizer states (SVD projection r=128) | ~2 GB |
+| **GaLore-inspired** | Low-rank weight decomposition | AdamW on factorized weights | ~2 GB |
 | **LISA** | 2024 | Activations (50% layer sampling) | ~4 GB |
 | **FP16 States** | Native | Optimizer precision (32→16 bit) | ~1.5 GB |
 | **INT8 States** | 8-bit Adam | Optimizer precision (32→8 bit) | ~3 GB |
@@ -132,7 +133,7 @@ vsqz combines 8 training + 3 archival techniques. Each targets a different memor
 |---------|--------|-------------|---------|
 | **FP16 Compression** | IEEE 754 | FP32→FP16 weight storage | 50% |
 | **zstd Post-Compress** | Facebook | 5-15% extra on top of FP16 | 5-15% |
-| **AdamW Stripping** | vsqz | Remove optimizer dead weight | 99% |
+| **AdamW Stripping** | vsqz | Drop momentum+variance (2× model size) | ~66% of ckpt |
 | **SHA-256** | NIST | Cryptographic integrity | – |
 | **Recovery Record** | RAR | Self-repairing header | – |
 | **KV-Cache H.264** | StreamingLLM | I/P/B-frame token eviction | 2× context |
@@ -191,7 +192,7 @@ done
 vsqz -kzs 8G large-model/       → .001, .002, ... .zst (compressed chunks)
 
 # Clean checkpoint (strip AdamW, compress, keep original)
-vsqz -kx adam pytorch_model.bin  → weights only, 99% smaller
+vsqz -kx adam pytorch_model.bin  → strip AdamW states, keep weights
 
 # Download once, compress, delete original
 vsqz model.safetensors          → model.safetensors.vsqz (no raw left)
@@ -223,9 +224,9 @@ print(f'Verdict: Safe to delete original')
 
 ```python
 from transformers import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Just works
+model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # 🧪 Preview
 ```
-No conversion needed — `.vsqz` loads directly as a HuggingFace model.
+HF plugin included — manual setup needed. Full integration in v0.4.1.
 
 ### Training (HuggingFace / Axolotl)
 
@@ -287,7 +288,7 @@ Stacks FP16 + zstd + AdamW stripping. Optimal for long-term storage, cloud uploa
 | Step | What happens | Size reduction |
 |------|-------------|---------------|
 | 1. FP32→FP16 | Half-precision weights | 2× |
-| 2. AdamW Strip | Remove optimizer states | 99%+ |
+| 2. AdamW Strip | Remove momentum+variance (2× model) | ~66% of ckpt |
 | 3. zstd | Post-compression | 5-15% extra |
 | **Combined** | **Archive grade** | **87% vs all three formats** |
 
@@ -337,8 +338,8 @@ Every PR gets an automated review (imports, stubs, extensions, tests, paths, REA
 |--|------|-------------|------|
 | Training | ❌ | ✅ | ✅ |
 | Inference | ✅ | ❌ | ✅ |
-| Optimizer State | ❌ | ❌ | 15 MB |
-| Context Expansion | ❌ | ❌ | 2× |
+| Optimizer State | ❌ | ❌ | stripped |
+| Context Expansion | ❌ | ❌ | beta |
 | File Size (9B) | 18 GB | 18 GB | 8 GB |
 | zstd Archive | ❌ | ❌ | ✅ (-z, +15%) |
 | Faster Downloads | ❌ | ❌ | ✅ 55% smaller |
