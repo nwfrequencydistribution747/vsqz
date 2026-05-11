@@ -227,7 +227,7 @@ def patch_huggingface() -> bool:
                     try:
                         config = AutoConfig.from_pretrained(arch)
                     except Exception:
-                        pass
+                        pass  # noqa — unsupported architecture, fallback below
                 if config is None or not hasattr(config, 'hidden_size'):
                     raise ValueError(
                         "Cannot determine model architecture from .vsqz file. "
@@ -278,7 +278,7 @@ def patch_huggingface() -> bool:
         _AMCLM.from_pretrained = _make_auto_patch(_orig_amclm_fp)
         _AM.from_pretrained = _make_auto_patch(_orig_am_fp)
     except Exception:
-        pass
+        pass  # noqa — older transformers without AutoModel, graceful fallback
 
     _PATCHED = True
 
