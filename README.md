@@ -20,8 +20,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > 🔥 **New in v0.4.0: Multi-model delta sharing.** Fine-tuned the same base model
 > 5 different ways? Load the base weights **once** and apply deltas. 5 models in the
 > VRAM of 1. Self-describing, SHA-verified, format-agnostic.
-> 🧪 Preview: --serve loads shared tensors for VRAM measurement.
-> Full multi-model inference coming soon.
+> `--diff` is production-ready. `--serve` shares tensors + measures VRAM (full inference in v0.4.1).
 >
 > ```
 > vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
@@ -261,9 +260,9 @@ print(f'Verdict: Safe to delete original')
 
 ```python
 from transformers import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Preview
+model = AutoModelForCausalLM.from_pretrained("model.vsqz")  # Just works
 ```
-🧪 HF plugin included — manual setup required. Full AutoModel integration in v0.4.1.
+Import vsqz — AutoModel now accepts `.vsqz` files natively. No manual setup.
 
 ### Training (HuggingFace / Axolotl)
 
