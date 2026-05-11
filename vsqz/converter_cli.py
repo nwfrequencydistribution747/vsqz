@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .argparse_vsqz import parse_args
 from .converter_core import (
-    _do_test, _do_list, _do_decompress, _do_recursive, _do_compress,
+    _do_test, _do_list, _do_decompress, _do_recursive, _do_compress, _do_mmproj,
 )
 from .converter_delta import _do_diff, _do_serve, _do_rediff
 from .converter_io import _decompress_zstd, _fmt_bytes
@@ -60,7 +60,8 @@ Examples:
   vsqz -r models/                      # compress all models in directory
   vsqz --diff base.vsqz fine.gguf -o delta.vsqz    # compute delta (shared weights)
   vsqz --rediff base.pt delta.vsqz -o fine.gguf    # reconstruct from base+delta
-  vsqz --serve base.vsqz delta1.vsqz delta2.vsqz   # multi-model: shared base + deltas"""
+  vsqz --serve base.vsqz delta1.vsqz delta2.vsqz   # multi-model: shared base + deltas
+  vsqz --mmproj HF_model_dir/ -o mmproj.gguf        # extract vision encoder (all VL archs)"""
 
 
 def main():
@@ -79,6 +80,7 @@ def main():
     do_diff = parsed.diff
     do_serve = parsed.serve
     do_rediff = parsed.rediff
+    do_mmproj = parsed.mmproj
     recursive = parsed.recursive
     split_val = parsed.split
     exclude_pats = parsed.exclude
@@ -112,6 +114,11 @@ def main():
     # ── Rediff ──────────────────────────────────────────────────────
     if do_rediff and source and output:
         _do_rediff(source, output, extra_output, verbose)
+        return
+
+    # ── mmproj ──────────────────────────────────────────────────────
+    if do_mmproj and source:
+        _do_mmproj(source, extra_output or output, verbose)
         return
 
     # Handle .vsqz.zst transparently (decompress first)

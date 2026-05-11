@@ -25,6 +25,7 @@ from .converter_io import (
     _TORCH_AVAILABLE as _TIA, logger,
     _fmt_bytes, _load_source, _build_vsqz_header, _write_vsqz,
     _decompress_zstd, _confirm_deletion,
+    _filter_vision_tensors, _save_gguf,
 )
 from .converter_restore import _restore_tensors, _restore_raw_files
 
@@ -327,6 +328,39 @@ def _do_decompress(source, output, keep, verbose):
     if not keep:
         if _confirm_deletion(source):
             os.remove(source)
+
+
+def _do_mmproj(source, output, verbose=False):
+    """Extract vision/audio encoder subset as GGUF (mmproj replacement).
+
+    Works for any VL/audio model: Qwen-VL, LLaVA, Phi-4-Vision-Audio, etc.
+    No HF conversion needed — pure tensor name filtering.
+    """
+    if not output:
+        output = source + "-mmproj.gguz" if source.endswith('.vsqz') else source.rstrip('/') + '-mmproj.gguf'
+
+    if verbose: print(f"Extracting mmproj: {source} → {output}")
+
+    # Load source (HF dir, .vsqz, .gguf, .safetensors)
+    tensors, meta = _load_source(Path(source))
+    vision = _filter_vision_tensors(tensors)
+
+    if not vision:
+        print(f"  ⚠️  No vision/audio tensors found. Model may not be VL/audio.")
+        print(f"  Detected prefixes: {_VL_PREFIXES}")
+        sys.exit(1)
+
+    if verbose:
+        total = sum(t.nbytes for t in vision.values())
+        print(f"  Vision tensors: {len(vision)} ({_fmt_bytes(total)})")
+
+    # Write as GGUF
+    gguf_meta = {"format": "gguf", "tensor_infos": [], "kv_pairs": {},
+                 "version": 3, "source_files": {"mmproj.gguf": list(vision.keys())}}
+    _save_gguf(Path(output), vision, gguf_meta, verbose=verbose)
+
+    if verbose:
+        print(f"  ✅ mmproj: {output} ({_fmt_bytes(Path(output).stat().st_size)})")
 
 
 def _do_recursive(source, quantize, keep, force, verbose, quiet):

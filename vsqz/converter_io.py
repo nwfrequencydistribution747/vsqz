@@ -85,6 +85,25 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+_VL_PREFIXES = ("v.blk", "v.patch_embd", "v.post_ln", "v.position_embd", "mm.",
+                "visual.", "vision_tower", "vision_encoder", "vision_model",
+                "multi_modal_projector", "mlp1.", "siglip",
+                "perceiver", "resampler",
+                # Audio
+                "audio_encoder", "speech_encoder", "whisper", "wav2vec2",
+                "hubert", "audio_tower")
+
+
+def _filter_vision_tensors(tensors):
+    """Extract vision-encoder tensors from a full model dict. Works across all VL architectures."""
+    vision = {}
+    for name, tensor in tensors.items():
+        lower = name.lower()
+        if any(lower.startswith(p) for p in _VL_PREFIXES):
+            vision[name] = tensor
+    return vision
+
+
 def _compute_delta(base_tensors, variant_tensors, tolerance=0):
     """Return tensors that differ between base and variant.
 
