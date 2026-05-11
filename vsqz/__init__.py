@@ -57,7 +57,7 @@ from .converter_core import convert_to_vsqz
 from .converter_cli import main
 from .converter_io import _fmt_bytes, _compute_delta, _load_source
 
-__version__ = "0.4.1.dev0"
+__version__ = "0.4.2"
 __all__ = [
     "VRAMSqueeze",
     "KVCacheCompressor",
