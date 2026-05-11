@@ -22,9 +22,14 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > format-agnostic. `--serve` (preview) shares base tensors + measures VRAM savings.
 > Full multi-model inference in v0.5. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
 >
+> For model distribution: one base model + tiny deltas instead of dozens of full downloads.
+> `--rediff` reconstructs any fine-tune from base + delta. 50 models at ~1 GB each
+> instead of 18 GB — a clean base catalog with lightweight variants.
+>
 > ```
-> vsqz --diff  qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz   # only changed weights
-> vsqz --serve qwen-base.vsqz qwopus-delta.vsqz huihui-delta.vsqz  # base once, rest on top
+> vsqz --diff   qwen-base.vsqz qwopus.gguf  -o qwopus-delta.vsqz      # only changed weights
+> vsqz --rediff qwen-base.vsqz qwopus-delta.vsqz -o qwopus-full.gguf  # reconstruct full model
+> vsqz --serve  qwen-base.vsqz qwopus-delta.vsqz huihui-delta.vsqz    # base once, rest on top
 > ```
 >
 > `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
