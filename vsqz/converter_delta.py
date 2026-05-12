@@ -50,13 +50,8 @@ def _do_diff(source, variant, extra_output, verbose):
         e = bh["tensors"][n]
         d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
         base_tensors[n] = np.frombuffer(bt[n], dtype=d).reshape(e.get("shape",[]))
-    import hashlib as _hl2
-    base_sha = _hl2.sha256(
-        b"".join(
-            n.encode() + base_tensors[n].astype(np.float16).tobytes()
-            for n in sorted(base_tensors)
-        )
-    ).hexdigest()
+    # Use authoritative file-level SHA from base .vsqz (consistent with stream_diff + ModelSwarm)
+    base_sha = bh.get("sha256", "")
     base_meta = {"format": bh.get("converted_from","safetensors")}
 
     # Load variant — may be .vsqz or raw format
@@ -267,12 +262,8 @@ def _do_rediff(source, delta_in, delta_out, verbose):
         print("  Error: delta must be a .vsqz delta file (use --diff to create)")
         sys.exit(1)
 
-    # SHA verification
-    import hashlib as _hl
-    base_sha = _hl.sha256(
-        b"".join(n.encode() + base_tensors[n].astype(np.float16).tobytes()
-                 for n in sorted(base_tensors))
-    ).hexdigest()
+    # SHA verification — use file-level SHA from base header (consistent everywhere)
+    base_sha = bh.get("sha256", "")
     expected_sha = dh.get("base_sha256", "")
     if expected_sha != base_sha:
         bi = dh.get("base_model", {})
