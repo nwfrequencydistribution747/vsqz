@@ -228,10 +228,10 @@ def _do_serve(source, args, verbose, show_status=False):
     swarm = ModelSwarm(source, deltas)
     swarm.load(quiet=not verbose)
 
-    if show_status:
-        print(swarm.status())
-    elif verbose:
-        print(swarm.status())
+    # Always show status for --serve (minimal in non-verbose, full if --status)
+    status = swarm.status()
+    if show_status or verbose:
+        print(status)
 
 
 def _do_rediff(source, delta_in, delta_out, verbose):

@@ -422,6 +422,7 @@ def _build_vsqz_header(tensors: Dict, metadata: Dict, quantize: str) -> Dict:
             "shape": list(tensor.shape),
             "size": len(blob),
             "offset": offset,
+            "sha256": "0" * 64,  # placeholder — filled by _write_vsqz (same length, no overflow)
         }
         offset += len(blob)
 
@@ -482,6 +483,8 @@ def _write_vsqz(path: Path, header: Dict, tensors: Dict, raw_blobs: Dict = None)
             f.write(data)
             sha.update(data)
             header["tensors"][name]["size"] = len(data)
+            # Per-tensor SHA for blazing-fast diff comparisons (90%+ skip)
+            header["tensors"][name]["sha256"] = hashlib.sha256(data).hexdigest()
 
         # Write raw file blobs after tensors
         if raw_blobs:

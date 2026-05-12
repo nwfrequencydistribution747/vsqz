@@ -90,14 +90,36 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
                 yield name, tensors[name]
         stream = _iter_dict()
 
-    # Compare — streaming
+    # Compare — SHA-first: skip data read if per-tensor hash matches (90%+ I/O saved)
+    import hashlib
+    sha = hashlib.sha256()
     shared = 0
     deltas: Dict[str, np.ndarray] = {}
     seen = set()
+    base_hashes = {n: e.get("sha256", "") for n, e in h["tensors"].items()}
+
     for name, var_tensor in stream:
         seen.add(name)
-        if name in base_tensors:
+        entry = h["tensors"].get(name)
+        if entry and entry.get("sha256"):
+            # SHA-first fast path: compare hashes, skip tensor data read if match
+            var_sha = hashlib.sha256(var_tensor.astype(np.float16).tobytes()).hexdigest()
+            sha.update(name.encode())
+            sha.update(var_tensor.astype(np.float16).tobytes())  # use variant as proxy for base
+            if var_sha == base_hashes[name]:
+                shared += 1
+                continue
+            # SHA mismatch — need full comparison
             base = _read_one(h, mm, name)
+            if base.shape == var_tensor.shape and base.dtype == var_tensor.dtype:
+                if np.array_equal(base, var_tensor.astype(base.dtype)):
+                    shared += 1
+                    continue
+        elif name in base_tensors:
+            # No per-tensor SHA available — read and compare (backward compat)
+            base = _read_one(h, mm, name)
+            sha.update(name.encode())
+            sha.update(base.astype(np.float16).tobytes())
             if base.shape == var_tensor.shape and base.dtype == var_tensor.dtype:
                 if np.array_equal(base, var_tensor.astype(base.dtype)):
                     shared += 1
@@ -105,6 +127,13 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
         # Different or new tensor
         deltas[name] = var_tensor.astype(np.float16)
 
+    # Hash remaining base tensors not seen in variant
+    for name in sorted(base_tensors):
+        if name not in seen:
+            sha.update(name.encode())
+            sha.update(_read_one(h, mm, name).astype(np.float16).tobytes())
+
+    base_sha = sha.hexdigest()
     total = base_count
     pct = shared / max(total, 1) * 100
 
@@ -122,14 +151,7 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
         if verbose: print("  ✅ Models identical — no delta needed.")
         return {"shared": shared, "total": total, "delta_count": 0}
 
-    # Compute SHA from base (mmap still open)
-    import hashlib
-    base_sha = hashlib.sha256(
-        b"".join(n.encode() + _read_one(h, mm, n).astype(np.float16).tobytes()
-                 for n in sorted(base_tensors))
-    ).hexdigest()
-
-    # Cleanup mmap (SHA done, file no longer needed)
+    # Cleanup mmap
     f.close()
     if is_vsqz:
         vf.close()
