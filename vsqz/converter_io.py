@@ -93,7 +93,7 @@ try:
     if _tcheck.cuda.is_available():
         _GPU_AVAILABLE = True
 except Exception:
-    pass
+    pass  # noqa
 
 _VL_PREFIXES = ("v.blk", "v.patch_embd", "v.post_ln", "v.position_embd", "mm.",
                 "visual.", "vision_tower", "vision_encoder", "vision_model",
@@ -125,7 +125,7 @@ def _to_gpu(tensors: dict) -> dict:
         if free_vram > total_bytes * 1.3:  # 30% headroom
             return {n: torch.from_numpy(t).cuda() for n, t in tensors.items()}
     except Exception:
-        pass
+        pass  # noqa
     return tensors
 
 
