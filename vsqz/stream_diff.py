@@ -92,11 +92,11 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
 
     # Compare — SHA-first: skip data read if per-tensor hash matches (90%+ I/O saved)
     import hashlib
-    sha = hashlib.sha256()
     shared = 0
     deltas: Dict[str, np.ndarray] = {}
     seen = set()
     base_hashes = {n: e.get("sha256", "") for n, e in h["tensors"].items()}
+    base_sha = h.get("sha256", "")  # File-level SHA: covers all base tensor data, authoritative
 
     for name, var_tensor in stream:
         seen.add(name)
@@ -104,8 +104,6 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
         if entry and entry.get("sha256"):
             # SHA-first fast path: compare hashes, skip tensor data read if match
             var_sha = hashlib.sha256(var_tensor.astype(np.float16).tobytes()).hexdigest()
-            sha.update(name.encode())
-            sha.update(var_tensor.astype(np.float16).tobytes())  # use variant as proxy for base
             if var_sha == base_hashes[name]:
                 shared += 1
                 continue
@@ -118,8 +116,6 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
         elif name in base_tensors:
             # No per-tensor SHA available — read and compare (backward compat)
             base = _read_one(h, mm, name)
-            sha.update(name.encode())
-            sha.update(base.astype(np.float16).tobytes())
             if base.shape == var_tensor.shape and base.dtype == var_tensor.dtype:
                 if np.array_equal(base, var_tensor.astype(base.dtype)):
                     shared += 1
@@ -127,21 +123,9 @@ def stream_diff(base_vsqz: str, variant_path: str, output: str, verbose: bool = 
         # Different or new tensor
         deltas[name] = var_tensor.astype(np.float16)
 
-    # Hash remaining base tensors not seen in variant
-    for name in sorted(base_tensors):
-        if name not in seen:
-            sha.update(name.encode())
-            sha.update(_read_one(h, mm, name).astype(np.float16).tobytes())
-
-    base_sha = sha.hexdigest()
     total = base_count
     pct = shared / max(total, 1) * 100
-
     if verbose:
-        import hashlib
-        base_sha = hashlib.sha256(
-            b"".join((n + ' ').encode('utf-8') for n in sorted(base_tensors))
-        ).hexdigest()[:16]
         print(f"  Base:    {total} tensors ({base_size_mb:.0f} MB)")
         print(f"  Variant: {len(seen)} tensors streamed")
         print(f"  Shared:  {shared}/{total} ({pct:.0f}%)")

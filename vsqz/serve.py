@@ -38,6 +38,7 @@ class ModelSwarm:
         self._models: Dict[str, Dict[str, "torch.Tensor"]] = {}
         self._loaded = False
         self._base_size = 0
+        self._base_sha = ""  # File-level SHA from base .vsqz (for delta verification)
 
     @property
     def _torch(self):
@@ -58,8 +59,10 @@ class ModelSwarm:
         # ── Load base as numpy first (mmap/stream from file) ──────────
         base_src = str(self.base_path)
         base_np: Dict[str, np.ndarray] = {}
+        self._base_sha = ""
         if base_src.endswith('.vsqz'):
             h, td = _read_vsqz(base_src)
+            self._base_sha = h.get("sha256", "")
             for name in sorted(h["tensors"]):
                 e = h["tensors"][name]
                 d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(
@@ -97,16 +100,9 @@ class ModelSwarm:
                     print(f"  ⚠️  {dp.name} is not a delta file — skipping")
                     continue
 
-                # Verify base SHA
+                # Verify base SHA — use authoritative file-level SHA from base
                 if h.get("base_sha256"):
-                    import hashlib
-                    expected = h["base_sha256"]
-                    actual = hashlib.sha256(
-                        b"".join(n.encode() + self._base_tensors[n].cpu().numpy()
-                                   .astype(np.float16).tobytes()
-                                 for n in sorted(self._base_tensors))
-                    ).hexdigest()
-                    if expected != actual:
+                    if h["base_sha256"] != self._base_sha:
                         print(f"  ⚠️  {dp.name}: BASE SHA MISMATCH — wrong base? Skipping.")
                         continue
 
