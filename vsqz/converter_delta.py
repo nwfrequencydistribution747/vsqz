@@ -35,6 +35,14 @@ def _do_diff(source, variant, extra_output, verbose):
     if variant.endswith('.vsqz'):
         variant_path = _auto_rejoin_split(variant_path)
 
+    # ── Streaming diff path (GGUF/.vsqz variant) ──
+    if variant.endswith('.gguf') or variant.endswith('.vsqz'):
+        from .stream_diff import stream_diff
+        result = stream_diff(source, variant, delta_out, verbose=verbose)
+        if result["delta_count"] == 0 and verbose:
+            print("  ✅ Models identical — no delta needed.")
+        return
+
     from .vsqz_format import _read_vsqz
     bh, bt = _read_vsqz(str(source_path), verify_sha256=True)
     base_tensors = {}
@@ -42,13 +50,8 @@ def _do_diff(source, variant, extra_output, verbose):
         e = bh["tensors"][n]
         d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
         base_tensors[n] = np.frombuffer(bt[n], dtype=d).reshape(e.get("shape",[]))
-    import hashlib as _hl2
-    base_sha = _hl2.sha256(
-        b"".join(
-            n.encode() + base_tensors[n].astype(np.float16).tobytes()
-            for n in sorted(base_tensors)
-        )
-    ).hexdigest()
+    # Use authoritative file-level SHA from base .vsqz (consistent with stream_diff + ModelSwarm)
+    base_sha = bh.get("sha256", "")
     base_meta = {"format": bh.get("converted_from","safetensors")}
 
     # Load variant — may be .vsqz or raw format
@@ -207,60 +210,23 @@ def _do_diff(source, variant, extra_output, verbose):
         print(f"  Delta written: {delta_out} ({_fmt_bytes(Path(delta_out).stat().st_size)})")
 
 
-def _do_serve(source, args, verbose):
-    """--serve: Multi-model shared base + deltas."""
-    print(f"Serving multi-model: {source}")
+def _do_serve(source, args, verbose, show_status=False):
+    """--serve: Multi-model shared base + deltas via ModelSwarm."""
+    from .serve import ModelSwarm
+
     deltas = [a for a in args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
     if not deltas:
         print("Usage: vsqz --serve base_model delta1.vsqz [delta2.vsqz ...]")
         sys.exit(1)
 
-    # Load base
-    base_tensors, base_meta = _load_source(Path(source))
-    base_size = sum(t.nbytes for t in base_tensors.values())
-    print(f"  Base: {len(base_tensors)} tensors ({_fmt_bytes(base_size)})")
+    if verbose: print(f"Serving multi-model: {source}")
+    swarm = ModelSwarm(source, deltas)
+    swarm.load(quiet=not verbose)
 
-    # Compute base SHA (fp16-normalized for cross-format consistency)
-    import hashlib as _hl
-    base_sha = _hl.sha256(
-        b"".join(
-            n.encode() + base_tensors[n].astype(np.float16).tobytes()
-            for n in sorted(base_tensors)
-        )
-    ).hexdigest()
-
-    # Apply each delta (verify base SHA match)
-    loaded = 1
-    for delta_path in deltas:
-        from .vsqz_format import _read_vsqz
-        dh, dd = _read_vsqz(delta_path)
-        if not dh.get("delta"):
-            print(f"  ⚠️  {delta_path} is not a delta file — skipping")
-            continue
-        expected_sha = dh.get("base_sha256", "")
-        if expected_sha and expected_sha != base_sha:
-            bi = dh.get("base_model", {})
-            arch = bi.get("architecture", "unknown")
-            params = bi.get("total_params", 0)/1e9
-            print(f"  ⚠️  {Path(delta_path).name}: BASE MISMATCH")
-            print(f"      Expected: {arch} ({params:.1f}B) — SHA {expected_sha[:16]}...")
-            print(f"      Loaded:   {_fmt_bytes(base_size)} base — SHA {base_sha[:16]}...")
-            print(f"      Skipping this delta.")
-            continue
-        for name in sorted(dd):
-            if name in base_tensors:
-                arr = np.frombuffer(dd[name],
-                    dtype=np.float16 if dh["tensors"][name]["dtype"] == "float16" else np.float32
-                ).reshape(dh["tensors"][name]["shape"])
-                base_tensors[name] = arr
-        loaded += 1
-        print(f"  + {Path(delta_path).name} ({len(dd)} deltas)")
-
-    total_size = sum(t.nbytes for t in base_tensors.values())
-    saved = _fmt_bytes(base_size * loaded - total_size)
-    print(f"  {loaded} models loaded: base {_fmt_bytes(base_size)} + {loaded-1} delta(s)")
-    print(f"  Total VRAM: {_fmt_bytes(total_size)} (saved {saved} vs loading separately)")
-    print("  ✅ Multi-model ready (base shared, deltas applied)")
+    # Always show status for --serve (minimal in non-verbose, full if --status)
+    status = swarm.status()
+    if show_status or verbose:
+        print(status)
 
 
 def _do_rediff(source, delta_in, delta_out, verbose):
@@ -296,12 +262,8 @@ def _do_rediff(source, delta_in, delta_out, verbose):
         print("  Error: delta must be a .vsqz delta file (use --diff to create)")
         sys.exit(1)
 
-    # SHA verification
-    import hashlib as _hl
-    base_sha = _hl.sha256(
-        b"".join(n.encode() + base_tensors[n].astype(np.float16).tobytes()
-                 for n in sorted(base_tensors))
-    ).hexdigest()
+    # SHA verification — use file-level SHA from base header (consistent everywhere)
+    base_sha = bh.get("sha256", "")
     expected_sha = dh.get("base_sha256", "")
     if expected_sha != base_sha:
         bi = dh.get("base_model", {})

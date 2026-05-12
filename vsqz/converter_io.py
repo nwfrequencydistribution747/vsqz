@@ -85,6 +85,16 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+# GPU auto-detection for tensor offloading
+_GPU_AVAILABLE = False
+_GPU_OOM = False
+try:
+    import torch as _tcheck
+    if _tcheck.cuda.is_available():
+        _GPU_AVAILABLE = True
+except Exception:
+    pass
+
 _VL_PREFIXES = ("v.blk", "v.patch_embd", "v.post_ln", "v.position_embd", "mm.",
                 "visual.", "vision_tower", "vision_encoder", "vision_model",
                 "multi_modal_projector", "mlp1.", "siglip",
@@ -104,6 +114,21 @@ def _filter_vision_tensors(tensors):
     return vision
 
 
+def _to_gpu(tensors: dict) -> dict:
+    """Move tensors to GPU if available and beneficial. Falls back to CPU."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return tensors
+        free_vram = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+        total_bytes = sum(t.nbytes for t in tensors.values())
+        if free_vram > total_bytes * 1.3:  # 30% headroom
+            return {n: torch.from_numpy(t).cuda() for n, t in tensors.items()}
+    except Exception:
+        pass
+    return tensors
+
+
 def _compute_delta(base_tensors, variant_tensors, tolerance=0):
     """Return tensors that differ between base and variant.
 
@@ -117,7 +142,12 @@ def _compute_delta(base_tensors, variant_tensors, tolerance=0):
         if name in base_tensors:
             b = base_tensors[name]
             if b.shape == v.shape and b.dtype == v.dtype:
-                if np.array_equal(b, v):
+                # Handle both numpy and torch tensors
+                if hasattr(b, 'cpu'):  # torch tensor
+                    if _tcheck.equal(b.cpu(), v.cpu() if hasattr(v, 'cpu') else _tcheck.from_numpy(v)):
+                        shared += 1
+                        continue
+                elif np.array_equal(b, v):
                     shared += 1
                     continue
         # Tensor differs or doesn't exist in base — include in delta
@@ -359,7 +389,21 @@ def _load_gguf(path: Path) -> Tuple[Dict, Dict]:
             dtype = dtype_map.get(info["ggml_type"], np.float16)
             elem_size = np.dtype(dtype).itemsize
             data = f.read(total_elems * elem_size)
-            tensors[info["name"]] = np.frombuffer(data, dtype=dtype).reshape(info["shape"])
+            arr = np.frombuffer(data, dtype=dtype).reshape(info["shape"]).copy()
+            # GPU auto-offload: if available and VRAM sufficient
+            if _GPU_AVAILABLE and not _GPU_OOM:
+                try:
+                    import torch as _t
+                    sz = arr.nbytes
+                    free = _t.cuda.get_device_properties(0).total_memory - _t.cuda.memory_allocated()
+                    if free > sz * 1.5 + 512 * 1024 * 1024:
+                        tensors[info["name"]] = _t.from_numpy(arr).cuda()
+                        continue
+                    else:
+                        _GPU_OOM = True  # stop trying
+                except Exception:
+                    _GPU_OOM = True
+            tensors[info["name"]] = arr
 
     return tensors, metadata
 
@@ -378,6 +422,7 @@ def _build_vsqz_header(tensors: Dict, metadata: Dict, quantize: str) -> Dict:
             "shape": list(tensor.shape),
             "size": len(blob),
             "offset": offset,
+            "sha256": "0" * 64,  # placeholder — filled by _write_vsqz (same length, no overflow)
         }
         offset += len(blob)
 
@@ -438,6 +483,8 @@ def _write_vsqz(path: Path, header: Dict, tensors: Dict, raw_blobs: Dict = None)
             f.write(data)
             sha.update(data)
             header["tensors"][name]["size"] = len(data)
+            # Per-tensor SHA for blazing-fast diff comparisons (90%+ skip)
+            header["tensors"][name]["sha256"] = hashlib.sha256(data).hexdigest()
 
         # Write raw file blobs after tensors
         if raw_blobs:

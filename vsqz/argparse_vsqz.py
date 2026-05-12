@@ -16,6 +16,9 @@ def parse_args():
     p.add_argument("--serve", action="store_true")
     p.add_argument("--rediff", action="store_true")
     p.add_argument("--mmproj", action="store_true")
+    p.add_argument("-u", "--update", action="store_true", help="Upgrade old .vsqz to latest format")
+    p.add_argument("--status", action="store_true", help="Show VRAM comparison stats with --serve")
+    p.add_argument("--port", type=int, default=0, metavar="PORT", help="Base port for multi-model server")
 
     # Behavior
     p.add_argument("-k", "--keep", action="store_true")

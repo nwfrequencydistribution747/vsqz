@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .argparse_vsqz import parse_args
 from .converter_core import (
-    _do_test, _do_list, _do_decompress, _do_recursive, _do_compress, _do_mmproj,
+    _do_test, _do_list, _do_decompress, _do_recursive, _do_compress, _do_mmproj, _do_update,
 )
 from .converter_delta import _do_diff, _do_serve, _do_rediff
 from .converter_io import _decompress_zstd, _fmt_bytes
@@ -61,6 +61,7 @@ Examples:
   vsqz --diff base.vsqz fine.gguf -o delta.vsqz    # compute delta (shared weights)
   vsqz --rediff base.pt delta.vsqz -o fine.gguf    # reconstruct from base+delta
   vsqz --serve base.vsqz delta1.vsqz delta2.vsqz   # multi-model: shared base + deltas
+  vsqz -u old_model.vsqz new_model.vsqz              # upgrade to latest format (adds per-tensor SHA)
   vsqz --mmproj HF_model_dir/ -o mmproj.gguf        # extract vision encoder (all VL archs)"""
 
 
@@ -81,6 +82,8 @@ def main():
     do_serve = parsed.serve
     do_rediff = parsed.rediff
     do_mmproj = parsed.mmproj
+    do_update = parsed.update
+    server_port = parsed.port
     recursive = parsed.recursive
     split_val = parsed.split
     exclude_pats = parsed.exclude
@@ -108,12 +111,29 @@ def main():
 
     # ── Serve ───────────────────────────────────────────────────────
     if do_serve and source:
-        _do_serve(source, parsed.args, verbose)
+        deltas = [a for a in parsed.args[1:] if a.endswith('.vsqz') or a.endswith('.gguf')]
+        if not deltas:
+            print("Usage: vsqz --serve base_model delta1.vsqz [delta2.vsqz ...]")
+            print("       vsqz --serve base_model delta1.vsqz --status")
+            print("       vsqz --serve base_model delta1.vsqz --port 8081")
+            sys.exit(1)
+
+        if server_port > 0:
+            from .server import serve_models
+            serve_models(source, deltas, base_port=server_port)
+            import signal; signal.pause()
+        else:
+            _do_serve(source, parsed.args, verbose)
         return
 
     # ── Rediff ──────────────────────────────────────────────────────
     if do_rediff and source and output:
         _do_rediff(source, output, extra_output, verbose)
+        return
+
+    # ── Update ──────────────────────────────────────────────────────
+    if do_update and source:
+        _do_update(source, extra_output or output, verbose)
         return
 
     # ── mmproj ──────────────────────────────────────────────────────

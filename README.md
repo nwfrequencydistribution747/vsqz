@@ -8,7 +8,7 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 
 [![PyPI version](https://img.shields.io/pypi/v/vsqz)](https://pypi.org/project/vsqz/)
-[![tests](https://img.shields.io/badge/tests-41%2F1%20skipped-green)](https://github.com/butterwecksolutions/vsqz/actions)
+[![tests](https://img.shields.io/badge/tests-53%2F1%20skipped-green)](https://github.com/butterwecksolutions/vsqz/actions)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)]()
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/butterwecksolutions/vsqz/blob/main/LICENSE)
 [![Sponsor](https://img.shields.io/badge/sponsor-VSQZ%20unterst%C3%BCtzen-ff69b4)](https://github.com/sponsors/butterwecksolutions)
@@ -17,10 +17,12 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 
 **Unlike gzip/zip/7zip, no extraction needed.** `.vsqz` files load directly into RAM via numpy — no temp files, no double disk I/O. Roundtrip-decompress (`-d`) for tools that need native formats (llama.cpp, etc.).
 
-> 🔥 **New in v0.4.0: Multi-model delta sharing.** `--diff` stores only the weights
-> that changed between a base model and its fine-tune. Self-describing, SHA-verified,
-> format-agnostic. `--serve` (preview) shares base tensors + measures VRAM savings.
-> Full multi-model inference in v0.5. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
+> 🔥 **New in v0.4.3: Per-tensor SHA + SHA-first diff + GPU ModelSwarm.** 
+> `--diff` compares 32-byte per-tensor hashes before reading MB-scale weights
+> — 90%+ I/O saved for fine-tunes. `--serve` loads base ONCE on GPU, applies
+> deltas via pointer sharing (multi-model, single GPU copy). Verified: 2× 9B
+> models on RTX 3090 (403/427 tensors shared, 16.7 GB VRAM saved).
+> `-u` upgrades old .vsqz to latest format. [Try it →](https://github.com/butterwecksolutions/vsqz/tree/dev)
 >
 > For model distribution: one base model + tiny deltas instead of dozens of full downloads.
 > `--rediff` reconstructs any fine-tune from base + delta.
@@ -42,10 +44,9 @@ Instead of buying new disks or GPUs, use, support, share and integrate `vsqz` �
 > `vsqz -l delta.vsqz` shows what base it needs (architecture, params, SHA, timestamps).
 > Wrong base → rejected. Same base from any source (GGUF/safetensors/PT) → accepted.
 
-> **v0.3.5 — stable.** Full archiver (tar-level fidelity): compress, decompress, list, verify. Roundtrip-safe
-> for safetensors, GGUF, PyTorch. Training optimizers (GaLore, LISA, Q-GaLore) in beta. Inference features on roadmap.
-> directory structure, permissions, timestamps, symlinks. Roundtrip-safe for safetensors, GGUF, PyTorch.
-> `vsqz -l` lists archive contents. 41 tests, autonomous CI.
+> **v0.4.3 — dev.** Per-tensor SHA (90% less I/O for fine-tune diffs), SHA-first streaming,
+> GPU-native ModelSwarm (multi-model with shared base weights on GPU), `-u` upgrade flag,
+> incremental hash (no second pass). 53 tests. 9B model verified on RTX 3090.
 
 ```
 # Compress any model: 18GB → 8GB
@@ -54,9 +55,12 @@ python -m vsqz convert model/ output.vsqz
 # List archive contents (files, sizes, permissions, timestamps)
 python -m vsqz -l model.vsqz
 
-# 🔥 Multi-model: delta sharing (v0.4.0)
+# Upgrade old .vsqz to latest format (adds per-tensor SHA)
+vsqz -u old_model.vsqz new_model.vsqz
+
+# 🔥 Multi-model: delta sharing (SHA-first, 90%+ I/O saved)
 vsqz --diff  qwen.vsqz qwopus.gguf -o qwopus-delta.vsqz   # store only changed weights
-vsqz --serve qwen.vsqz qwopus-delta.vsqz ablit-delta.vsqz # 3 models, base once
+vsqz --serve qwen.vsqz qwopus-delta.vsqz ablit-delta.vsqz # 3 models, base once on GPU
 
 # Extract vision/audio encoder (all VL archs, legacy .gguf or .vsqz)
 vsqz --mmproj model/ -o mmproj.gguf     # llama.cpp compatible

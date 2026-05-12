@@ -330,6 +330,40 @@ def _do_decompress(source, output, keep, verbose):
             os.remove(source)
 
 
+def _do_update(source, output, verbose=False):
+    """Upgrade old .vsqz to latest format (adds per-tensor SHA). One-time per model."""
+    from .vsqz_format import _read_vsqz
+    from .converter_io import _write_vsqz, _build_vsqz_header, _fmt_bytes
+    import numpy as np
+
+    if not output:
+        output = source.replace('.vsqz', '_updated.vsqz')
+    if verbose: print(f"Upgrading: {source} → {output}")
+
+    h, td = _read_vsqz(str(source), verify_sha256=False)
+    tensors = {}
+    for name in sorted(h["tensors"]):
+        e = h["tensors"][name]
+        d = {"float32": np.float32, "float16": np.float16, "int8": np.int8}.get(e.get("dtype","float16"), np.float16)
+        tensors[name] = np.frombuffer(td[name], dtype=d).reshape(e["shape"])
+
+    # Preserve raw files (tokenizer, configs, chat_template) — their bytes
+    # are part of the file-level SHA, so loss would invalidate existing deltas
+    raw_blobs = h.get("_raw_blobs", None)
+    meta = {"format": h.get("converted_from","safetensors"),
+            "source_files": h.get("source_metadata",{}).get("source_files",{})}
+    if raw_blobs:
+        meta["raw_files_data"] = raw_blobs
+
+    new_h = _build_vsqz_header(tensors, meta, h.get("quantize","fp16"))
+    _write_vsqz(Path(output), new_h, tensors, raw_blobs)
+
+    if verbose:
+        old_sz = Path(source).stat().st_size
+        new_sz = Path(output).stat().st_size
+        print(f"  ✅ {_fmt_bytes(old_sz)} → {_fmt_bytes(new_sz)} ({len(tensors)} tensors, per-tensor SHA added)")
+
+
 def _do_mmproj(source, output, delta=None, verbose=False):
     """Extract vision/audio encoder subset as GGUF (mmproj replacement).
 
